@@ -1,0 +1,869 @@
+; > Evaluate
+; BASIC expression evaluator
+
+; 30-Aug-2008: Recursive Expression Evaluator and binary operator dispatch written
+; 01-Sep-2008: Hex values, double quotes, octal values
+; 03-Mar-2009: 31-bit decimal numbers working
+; 15-Jun-2010: Parsing comparisons done
+; 25-Jun-2013: FloatToInteger written, convert to &80000000 working.
+;              Bug: FloatToInt should round negative numbers down, INT(-PI) should be -4.
+; 15-Aug-2013: ABS moved here with speeded up Negate
+; 20-Nov-2013: Evaluate checks free memory before starting
+; 09-Dec-2013: AddressOf skips any following () to allow ^PROCname(), ^FNname()
+; 28-Jul-2016: Evaluator uses some (r5)+ instead of (r5)/inc, optimised bne/rts pairs
+; 29-Jul-2016: INT(negative) rounds down, INT(-PI) is -4.
+; 31-Jul-2016: Scanning fractional decimals and exponential decimals implemented.
+;              E<num> scanned but fnPower only implements positive exponents.
+; 07-Aug-2016: EnsureInt preserves r0/r1, -0 to -1 correctly rounds to -1.
+;              Bug: now causes A=-7/2:A%=A to round incorrectly.
+; 09-Jul-2016: EnsureInteger truncates, INT rounds downwards.
+;              Bug: EvalDecimal fails with num>10e9 unless E format used.
+; 16-Mar-2021: EvalDecimalVAL correctly returns 0 for non-numbers.
+;              EvalDecimalPrefix and EvalDecimalVAL can't merge as VAL allows spaces, E+num doesn't.
+; 18-Mar-2024: EvalHash corrected to EvalHashVal. Added @octal.
+; 10-May-2025: Optimised Bin/Oct/Hex constants.
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;                                                              ;;
+;; Check for syntax character and evaluate following expression ;;
+;;                                                              ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+; Check for and step past ')'
+; ===========================
+.CheckClose
+jsr  pc,SkipSpaceNext ; This ; Next
+.CheckClose1
+cmpb r0,#ASC")"
+beq  CheckOk
+.errMissingClose
+jsr  pc,Error
+equb 27,tknMissing,")",0
+align
+
+; Check for and step past ','
+; ===========================
+.CheckComma
+jsr  pc,SkipSpaceNext ; This ; Next
+cmpb r0,#ASC","
+beq  CheckOk
+.errMissingComma
+jsr  pc,Error
+equb 5,tknMissing,44,0
+align
+
+; Check for ',' evaluate and return following integer
+; ===================================================
+.EvalComma
+jsr  pc,CheckComma
+br   EvalInteger
+
+; Check for and step past '='
+; ===========================
+.CheckEqual
+jsr  pc,SkipSpaceNext ; This ; Next
+.CheckEqual1
+cmpb r0,#ASC"="
+beq  CheckOk
+;bne  errMissingEqual
+;.CheckOk
+;inc  r5
+;rts  pc
+.errMissingEqual
+jsr  pc,Error
+equb 4,tknMissing,"=",0
+align
+
+; Fetch next and check for <,=,>
+; ==============================
+.CheckCompare
+movb (r5),r0
+cmpb r0,#ASC"<"
+beq  ChkCmpOk
+cmpb r0,#ASC"="
+beq  ChkCmpOk
+cmpb r0,#ASC">"
+.ChkCmpOk
+.CheckOk
+rts  pc
+
+; Check for '=', evaluate and return following integer
+; ====================================================
+.EvalEqual
+jsr  pc,CheckEqual
+br   EvalInteger
+
+; Check for '#', evaluate and return following integer expression
+; ===============================================================
+;.EvalHash
+;jsr  pc,SkipSpaceNext
+;cmpb r0,#ASC"#"
+;beq  EvalInteger
+;.errMissingHash
+;jsr  pc,Error
+;equb 45,tknMissing,"#",0
+;align
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;                                                          ;;
+;; Evaluate expression and check for expected returned type ;;
+;;                                                          ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; INT - convert to integer, rounding down if negative
+; ===================================================
+.fnINT
+jsr  pc,EvalNumVal	; Evaluate numeric value
+beq  EnsureIntOk	; Already an integer
+tst  -(sp)		; Stack dummy value
+mov  #&7FFF,r1		; r1=nothing to round yet
+br   EnsureInteger2	; Convert and round down
+
+
+; EvalInteger - Evaluate numeric expression and return integer
+; ============================================================
+.EvalInteger1
+inc  r5			; Step past prefix character
+.EvalInteger
+jsr  pc,EvalNumeric	; Call expression evaluator
+			; Fall through to convert float to integer
+
+
+; EnsureInteger - If float, denormalise into an integer
+; =====================================================
+; On entry, r2/r3/r3=value
+; On exit,  r2/r3/r4=integer value, flags set from r2
+;           r0/r1 preserved
+;
+; Conversion to integer truncates, so +3.5 -> +3, -3.5 -> -3
+; The INT function rounds downwards, so +3.5 -> +3, -3.5 -> -4
+;
+.EnsureInteger
+tst  r2			; Check if float
+beq  EnsureIntOk	; Already an integer
+bmi  errTypeMismatch	; Error if a string
+mov  r1,-(sp)		; Save R1
+clr  r1			; r1=fraction count, prevent rounding
+.EnsureInteger2
+;
+; To convert float to integer we repeatedly divide the mantissa by 2
+; while incrementing the exponent, which multiplies the number by 2,
+; so the value remains the same. This loops until the mantissa is &9F,
+; which is an exponent of +31. At this point the mantissa will be the
+; binary value of the integer version of the float.
+;
+sub  #&9F,r2		; Reduce exponent
+bcs  EnsureIntNotBig	; Exponent<&9F, 2^31+x or smaller, ok
+bne  EnsureIntTooBig	; Exponent>&9F, 2^32 or bigger, too big to convert
+tst  r4			; Exponent=&9F, check for mantissa=&80000000
+bne  EnsureIntTooBig	; &9F,&....XXXX, too big
+cmp  r3,#&8000
+beq  EnsureIntDone	; &9F,&80000000 is only convertable &9F value
+.EnsureIntTooBig
+jmp  errTooBig		; ABS(float) is 2^32 or bigger, too big to convert
+.EnsureIntNotBig
+mov  r3,-(sp)		; Save sign bit
+bis  #&8000,r3		; Put top bit in
+clc
+.EnsureIntLp
+ror  r3			; Will always divide at least once
+ror  r4			; Divide mantissa by two
+adc  r1			; Add fractional bits, clear carry
+inc  r2			; Increment exponent to multiply by two
+bne  EnsureIntLp	; Loop until exp=+32
+tst  (sp)+		; Test sign bit
+bpl  EnsureIntDone	; Positive number, return it
+jsr  pc,NegateInteger	; Negate negative number
+cmp  #&8000,r1		; Is there anything to round
+sbc  r4			; Round negative number down for INT
+sbc  r3
+.EnsureIntDone
+mov  (sp)+,r1		; Restore R1
+tst  r2			; Set flags from type=int
+.EnsureIntOk
+rts  pc
+
+
+; EvalFloatVal - Evaluate real value
+; ==================================
+.EvalFloatVal
+jsr pc,EvalNumVal	; Call level 1 expression evaluator
+;br  EnsureFloat	; Fall through to convert to float
+
+
+; EnsureFloat - If integer, normalise into a float
+; ================================================
+; On entry, r2/r3/r3=value
+; On exit,  r2/r3/r4=float value, flags set from r2, EQ=zero, NE=non-zero
+;           r0/r1 preserved
+;
+.EnsureFloat
+tst  r2
+bne  EnsureFloatDone	; Already a float
+.IntegerToFloat
+bis  r3,r2
+bis  r4,r2
+beq  EnsureFloatDone	; Zero, no float representation, return
+;
+;   int  00, 00 00 00 01
+; float  80, 80 00 00 00, then remove sign
+;
+;   int  00, 00 00 01 00
+; float  88, 80 00 00 00, then remove sign
+;
+;   int  00, 40 00 00 00
+; float  9F, 80 00 00 00, then remove sign
+;
+;   int  00, FF FF FF FF
+; float  80, 80 00 00 00, then remove sign
+;
+mov  r3,-(sp)		; Test and stack sign
+bpl  EnsureFloatPlus	; Positive number, convert it
+jsr  pc,NegateInteger	; Negate negative number
+.EnsureFloatPlus
+mov  #&9F,r2		; Initial exponent
+.EnsureFloatLp
+;bit  #&8000,r3		; Has top bit moved to top?
+;bne  EnsureFloat2
+tst  r3			; Has top bit moved to top?
+bmi  EnsureFloat2
+clc			; previous TST clears Carry
+rol  r4			; Double mantissa
+rol  r3
+dec  r2			; Decrement exponent
+br   EnsureFloatLp	; Loop until top bit set
+.EnsureFloat2
+tst  (sp)+		; Unstack and test sign
+bmi  EnsureFloat3	; Negative, leave top bit set
+bic  #&8000,r3		; Remove implied top bit
+.EnsureFloat3
+tst  r2			; Set flags
+.EnsureFloatDone
+rts pc
+
+; EvalNumeric - Evaluate numeric expression
+; =========================================
+.EvalNumeric
+jsr  pc,Evaluate	; Call expression evaluator
+bmi  errTypeMismatch	; Returned string, we wanted a number
+rts  pc
+
+; EvalString - Evaluate string expression
+; =======================================
+.EvalString
+jsr  pc,Evaluate	; Call expression evaluator
+bpl  errTypeMismatch	; Returned number, we wanted a string
+rts  pc
+
+; EvalStringCR - Evaluate string expression and return CR-terminated
+; ==================================================================
+; On exit, r4=>cr-string with leading spaces skipped
+;          r3=string length with <cr>
+;
+.EvalStringCR
+jsr  pc,EvalString	; Call expression evaluator
+.EvalStoreCR
+bit  #&0100,r2
+bne  EvalStringCRlp	; Already <cr>-string
+.EvalStoreCRString
+mov  r3,-(sp)		; Save length
+;mov  r3,r2		; r2=length
+;mov  r4,r3		; r3=source string
+;jsr  pc,CopyString	; Copy to string buffer
+jsr  pc,EnsureString	; Copy to string buffer
+mov  (sp)+,r3		; Get length back
+add  r4,r3		; r3=>end of string
+movb #13,(r3)		; Put terminating CR in
+sub  r4,r3		; Restore r3=length
+.EvalStringCRlp
+dec  r3			; Decrement length for leading spaces
+cmpb (r4)+,#ASC" "
+beq  EvalStringCRlp	; Skip leading spaces
+dec  r4			; Point back to first non-space character
+inc  r3			; Balance extra dec r3
+inc  r3			; Add <cr> to length
+rts  pc
+
+; EvalStrValCR - Evaluate string value and return CR-terminated
+; =============================================================
+.EvalStrValCR
+jsr  pc,EvalLevel1	; Call level 1 expression evaluator
+bmi  EvalStoreCR	; Returned string, put terminating CR in
+
+.errTypeMismatch
+jsr pc,Error
+equb 6,"Type mismatch",0
+align
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;                                                          ;;
+;; Evaluate value and check for expected returned type      ;;
+;;                                                          ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; Check for '#', evaluate and return following integer value
+; ==========================================================
+; Handles are a value, not an expression, so that PTR#n+1 is
+; (PTR#n)+1 and not PTR#(n+1).
+;
+.EvalHashVal
+jsr  pc,SkipSpaceNext
+cmpb r0,#ASC"#"
+beq  EvalIntVal
+.errMissingHash
+jsr  pc,Error
+equb 45,tknMissing,"#",0
+align
+
+; EvalIntVal - Evaluate integer value
+; ===================================
+.EvalHashInt1
+inc r5			; Step past '#'
+.EvalIntVal
+jsr pc,EvalNumVal	; Call level 1 expression evaluator
+br  EnsureInteger	; If float, convert to integer
+
+; EvalNumVal - Evaluate numeric  value
+; ====================================
+.EvalNumVal
+jsr pc,EvalLevel1	; Call level 1 expression evaluator
+bmi errTypeMismatch	; Returned string, we wanted a number
+rts pc
+
+; EvalStrVal - Evaluate string value
+; ==================================
+.EvalStrVal
+jsr pc,EvalLevel1	; Call level 1 expression evaluator
+bpl errTypeMismatch	; Returned number, we wanted a string
+rts pc
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;                                                                       ;;
+;; EXPRESSION EVALUATOR                                                  ;;
+;; --------------------                                                  ;;
+;; Recursively calls seven expression levels, evaluating expressions at  ;;
+;; each level, looping within each level until all operators at that     ;;
+;; level are exhausted.                                                  ;;
+;;                                                                       ;;
+;; On entry, r5=>start of expression to evaluate                         ;;
+;; On exit,  r5=>first character after evaluated expression              ;;
+;;           r4/r3/r2=returned value, flags set from r2                  ;;
+;;           MI, r2=&80xx - dynamic string, r3=length, r4=start          ;;
+;;           MI, r2=&81xx - <cr>-string,    r3=length, r4=start          ;;
+;;           MI, r2=&82xx - <null>-string,  r3=length, r4=start          ;;
+;;           PL, r2=&00xx - number                                       ;;
+;;           PL, EQ, r2=&0000 - integer, r3=b31-b16, b4=b15-b0           ;;
+;;           PL, NE, r2=&00xx - real, r2=exponent,                       ;;
+;;                              r3=mantissa b31-b16, r4=mantissa b15-b0  ;;
+;;                                                                       ;;
+;; Within the evaluator, r0 and (r5)=next matched character              ;;
+;;                                                                       ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+.Evaluate1
+inc  r5			; Step past current character
+.Evaluate
+jsr pc,CheckFreeMemory
+
+; Evaluator Level 7 - OR, EOR
+; ===========================
+.EvalLevel7
+jsr  pc,EvalLevel6	; Call level 6 - AND
+.EvalLevel7More
+movb (r5),r0
+cmpb r0,#tknOR
+beq  EvalOR
+cmpb r0,#tknEOR
+beq  EvalEOR
+tst  r2			; Set flags from result type
+rts  pc
+.EvalOR
+.EvalEOR
+inc  r5			; Step past current character
+jsr  pc,StackIntAndOp
+jsr  pc,EvalLevel6	; Evaluate RHS parameter
+jsr  pc,UnstackIntAndCallOp
+;movb (r5),r0
+br   EvalLevel7More	; Loop to check for more OR/EOR
+
+
+; Evaluator Level 6 - AND
+; =======================
+.EvalLevel6
+jsr  pc,EvalLevel5	; Call level 5 - < <= = >= > <>
+.EvalLevel6More
+;movb (r5),r0
+movb (r5)+,r0
+cmpb r0,#tknAND
+;bne  EvalDone
+bne  EvalDoneDec
+;beq  EvalAND
+;rts  pc
+;.EvalAND
+;inc  r5		; Step past current character
+jsr  pc,StackIntAndOp
+jsr  pc,EvalLevel5	; Evaluate RHS parameter
+jsr  pc,UnstackIntAndCallOp
+;movb (r5),r0
+br   EvalLevel6More	; Loop to check for more AND
+
+
+; Evaluator Level 5 - < <= = >= > <>
+; ==================================
+.EvalLevel5
+jsr  pc,EvalLevel4	; Check for +, -
+jsr  pc,CheckCompare	; Fetch character and check for <,=,>
+bne  EvalDone
+;beq  EvalCompare
+;rts  pc
+;.EvalCompare
+mov  r0,r1		; Save first character in R1
+inc  r5			; Step to next character
+jsr  pc,CheckCompare	; Fetch and check for <,=,>
+bne  EvalCompare1	; Not <=, >=, <>, jump to to <,=,>
+cmp  r0,r1		; Is it <<, ==, >>
+beq  errSyntax2
+inc  r5			; Step past second character
+add  r0,r1		; Combine to form offset value
+.EvalCompare1
+bis  #&70,r1		; r1=79..7E for <=..>
+mov  r1,r0		; r0=operator
+jsr  pc,StackValAndOp
+jsr  pc,EvalLevel4	; Evaluate RHS paraneter
+jsr  pc,UnstackValAndCallOp
+rts  pc
+.errSyntax2
+jmp  errSyntax
+
+
+; Evaluator Level 4 - + -
+; =======================
+.EvalLevel4
+jsr  pc,EvalLevel3	; Call level 3 - * / DIV MOD
+.EvalLevel4More
+;movb (r5),r0		; Get current character
+movb (r5)+,r0		; Get current character
+cmpb r0,#ASC"+"
+beq  EvalPlus
+cmpb r0,#ASC"-"
+;bne  EvalDone
+bne  EvalDoneDec
+;beq  EvalMinus
+;rts  pc		; Return
+.EvalPlus
+.EvalMinus
+;inc  r5		; Step past current character
+jsr  pc,StackValAndOp
+jsr  pc,EvalLevel3	; Evaluate RHS parameter
+jsr  pc,UnstackValAndCallOp
+;movb (r5),r0		; Get current character
+br   EvalLevel4More	; Loop to check for more + -
+
+
+; Evaluator Level 3 - * / DIV MOD
+; ===============================
+.EvalLevel3
+jsr  pc,EvalLevel2	; Call level 2 - ^
+.EvalLevel3More
+;movb (r5),r0		; Get current character
+movb (r5)+,r0		; Get current character
+cmpb r0,#ASC"*"
+beq  EvalTimes
+cmpb r0,#ASC"/"
+beq  EvalDivide
+cmpb r0,#tknDIV
+beq  EvalDIV
+cmpb r0,#tknMOD
+bne  EvalDoneDec
+;bne  EvalDone
+;beq  EvalMOD
+;rts  pc		; Return
+.EvalTimes
+.EvalDivide
+.EvalDIV
+.EvalMOD
+;inc  r5		; Step past current character
+jsr  pc,StackValAndOp
+jsr  pc,EvalLevel2	; Evaluate RHS parameter
+jsr  pc,UnstackValAndCallOp
+;movb (r5),r0		; Get current character
+br   EvalLevel3More	; Loop to check for more * / DIV MOD
+
+
+; Evaluator Level 2 - ^
+; =====================
+.EvalLevel2
+jsr  pc,EvalLevel1	; Call level 1 - eveything else
+.EvalLevel2More
+movb (r5)+,r0		; Get current character
+cmpb r0,#32
+beq  EvalLevel2More	; Skip spaces
+cmpb r0,#ASC"^"
+bne  EvalDoneDec
+;beq  EvalPower
+;dec  r5
+;rts  pc
+.EvalPower
+jsr  pc,StackValAndOp
+jsr  pc,EvalLevel1	; Evaluate RHS parameter
+jsr  pc,UnstackValAndCallOp
+br   EvalLevel2More	; Loop to check for more ^
+.EvalDoneDec
+dec  r5
+.EvalDone
+rts  pc
+
+
+.errMissingQuote
+jsr  pc,Error
+equb 9,tknMissing,34,0
+align
+
+; EvalBracket - bracketed expression
+; ----------------------------------
+.EvalBracket1
+inc  r5			; Step past '('
+.EvalBracket
+jsr  pc,Evaluate	; Evalute everything within brackets
+jsr  pc,CheckClose	; Check closing bracket
+tst  r2			; Set flags from returned type
+rts  pc
+
+; EvalUnaryMinus - -<value>
+; -------------------------
+.EvalUnaryMinus
+jsr  pc,EvalNumVal	; Get numeric value
+
+; Negate number
+; -------------
+; Preserves r0/r1 as called from elsewhere
+.NegateNumber
+tst  r2			; Check if integer or float
+beq  NegateInteger
+;mov  r0,-(sp)		; Save r0
+;mov  #&8000,r0
+;xor  r0,r3		; Toggle mantissa sign bit
+;mov  (sp)+,r0		; Restore r0
+sub  #&8000,r3		; Toggle mantissa sign bit
+tst  r2			; Set flags
+rts  pc
+
+.fnABS
+jsr pc,EvalNumVal
+beq fnABSint		; Jump if integer
+bic #&8000,r3		; Ensure float sign bit=0
+.fnABS1
+tst r2			; Set flags
+rts pc
+.fnABSint
+tst r3			; Check integer b31
+bpl fnABS1		; Positive, exit with flags set
+.NegateInteger
+sub #1,r4		; Do abs=NOT(num-1)
+sbc r3
+com r4
+com r3
+tst r2			; Set flags
+rts pc
+
+; EvalQuote - an immediate string
+; -------------------------------
+.EvalQuote
+adr  SV_STRING,r4	; Point to string buffer
+clr  r3			; Length=0
+.EvalQuoteLp
+movb (r5)+,r0		; Get character
+cmpb r0,#13
+beq  errMissingQuote
+movb r0,(r4)+		; Store in string buffer
+inc  r3			; Increment length
+cmpb r0,#34		; Is this a quote?
+bne  EvalQuoteLp	; Loop until terminating quote
+movb (r5)+,r0
+cmpb r0,#34		; Double quote?
+beq  EvalQuoteLp
+dec  r5
+adr  SV_STRING,r4	; Point to string buffer
+dec  r3			; Balance final inc
+mov  #&8000,r2		; Type=string, set flags
+rts  pc
+
+; ^<variable> - address of identifier
+; -----------------------------------
+.EvalAddrOf
+jsr  pc,SkipSpaceThis
+jsr  pc,VarFindCreateAddress	; Search for variable/FN/PROC, creating if nonexistant
+clr  r3
+cmpb (r5)+,#ASC"("	; Is it ^PROCname()
+bne  EvalHexDone	; If no following (), jump to return
+jsr  pc,CheckClose	; Ensure closing bracket present
+br   EvalHexOk		; Jump to return
+
+
+; Evaluator Level 1 - & - + () " ? ! | $ function variable
+; ========================================================
+; Called by other functions, so must set flags on exit
+; EvalLevel1 doesn't check free memory as uses very little stack
+; Free memory checked on entry to Level7Eval
+;
+.EvalLevel1
+clr  r4			; Set initial accumulator to 0
+clr  r3
+clr  r2
+
+; EvalUnaryPlus - +<value>
+; ------------------------
+.EvalUnaryPlus
+.EvalLevel1Spc
+movb (r5)+,r0		; Get current character, step to next
+cmp  r0,#32
+beq  EvalLevel1Spc	; Skip spaces
+cmpb r0,#ASC"("
+beq  EvalBracket
+cmpb r0,#ASC"^"
+beq  EvalAddrOf
+cmpb r0,#&22
+beq  EvalQuote
+;mov  #&6F,r1		; Highest hex digit+flags
+cmpb r0,#ASC"&"
+beq  EvalHex
+cmpb r0,#ASC"@"
+beq  EvalOct
+mov  #&31,r1		; Highest binary digit+flags
+cmpb r0,#ASC"%"
+beq  EvalBinary
+cmpb r0,#&8D
+bcc  EvalFunction1	; Token, jump via dispatch table
+jsr  pc,CheckDigit
+bcc  EvalDecimal	; '0'..'9', decimal digit
+cmpb r0,#ASC"-"
+beq  EvalUnaryMinus
+cmpb r0,#ASC"+"
+beq  EvalUnaryPlus
+cmpb r0,#ASC"."
+beq  EvalFraction	; .<frac>
+
+; Must be !, $, ?, |, variable, variable!offset or variable?offset
+; ----------------------------------------------------------------
+.EvalVariable
+dec  r5			; Point to first character of variable
+jmp  VarFindVal		; Returns full value, including length with $addr, $$addr
+
+.EvalFunction1
+jmp  EvalFunction	; Within 'Stack' module
+
+; EvalOct - @<octnumber>
+; ----------------------
+.EvalOct
+movb (r5),r0
+jsr  pc,CheckDigit
+bcs  EvalVariable	; @varname - not octal constant
+br   EvalOct2
+
+; EvalHex - &<hexnumber>
+;     also &o<octnumber>
+; ----------------------
+.EvalHexGo		; Call here from OSCLI to scan addresses
+.EvalHex
+mov  #&6F,r1		; Highest hex digit+flags
+movb (r5),r0
+bic  #&20,r0		; Force upper case
+cmpb r0,#ASC"O"
+bne  EvalHexEtc		; Scan hex value
+inc  r5			; Step past 'o'
+.EvalOct2
+mov  #&37,r1		; Highest octal digit+flags
+;asr  r1 		; Becomes &37, highest octal digit+flags
+;
+; EvalBinary - %<number>, r1 already set
+; --------------------------------------
+.EvalBinary
+.EvalHexEtc
+jsr  pc,GetHexOctBin	; Get and check first digit
+bcc  EvalHexEtc3	; Starts with an valid digit
+jsr  pc,Error
+equb 28,"Bad HEX, OCT or BIN",0
+align
+
+.EvalHexEtc1
+jsr  pc,GetHexOctBin	; Get and check another digit
+bcs  EvalHexDone	; Not bin/oct/hex, exit all done
+.EvalHexEtc3
+mov  r1,r2		; Use max valid char as bitcounter
+br   EvalHexEtc5
+.EvalEvalHexEtc4
+asl  r4			; Multiply current value by 2
+rol  r3
+bcs  jmpTooBig		; Overflowed out of b31
+.EvalHexEtc5
+ror  r2
+bcs  EvalEvalHexEtc4	; Loop to multiply by 2, 8 or 16
+bic  #&FFF0,r0		; Reduce to binary
+bis  r0,r4		; Add in current digit
+br   EvalHexEtc1	; Loop for more
+
+
+; EvalDecimalPrefix - read integer decimal exponent
+; -------------------------------------------------
+; Called to read E<decimal> from Decimal parser.
+; Reads 31-bit decimal number checking for +/- prefix
+; r5=>first character
+;
+.EvalDecimalNeg
+jsr  pc,EvalDecimalNext	; Step past '-' and evaluate
+jmp  NegateNumber	; Negate number and return
+.EvalDecimalPrefix
+movb (r5),r0
+cmpb r0,#ASC"-"
+beq  EvalDecimalNeg	; -number
+cmpb r0,#ASC"+"		; +number
+bne  EvalDecimalInt
+.EvalDecimalNext
+inc  r5			; Step past '+' or '-'
+
+; EvalDecimalInt - read integer decimal number
+; --------------------------------------------
+; Reads 31-bit decimal number to r4:r3
+; r5=>first character
+; Generates error if number too big
+;
+.EvalDecimalInt
+clr  r4
+clr  r3			; Clear accumulator
+.EvalDecimalLp
+jsr  pc,FetchCheckDigit
+bcs  EvalDecimalDone	; CS=no more digits
+jsr  pc,EvalTimes10	; r3:r4=r3:r4*10
+.EvalDecimalDigit
+bic  #&FFF0,r0
+add  r0,r4
+adc  r3			; r3:r4=r3:r4*10+n
+bpl  EvalDecimalLp	; Decimal number only up to b30
+.jmpTooBig
+jmp  errTooBig
+;rts  pc		; MI=Number too big
+.EvalDecimalDone
+.EvalHexDone
+dec  r5			; Point to terminating non-digit
+.EvalHexOk
+clr  r2			; Type=integer, set flags, PL, VC, EQ, CC
+rts  pc
+
+; EvalDecimalVAL - called from VAL to deal with +/- prefix
+; --------------------------------------------------------
+.EvalDecimalVALNeg
+jsr  pc,EvalDecimalVALNext
+jmp  NegateNumber
+.EvalDecimalVAL
+jsr  pc,SkipSpaceThis ; Next	; Skip spaces and get character
+cmpb r0,#ASC"-"
+beq  EvalDecimalVALNeg	; VAL"- number"
+cmpb r0,#ASC"+"
+bne  EvalDecimal2	; VAL"number"
+.EvalDecimalVALNext
+jsr  pc,FetchNextChar	; Step past '-' or '+'
+inc  r5			; Balance next dec
+
+; EvalDecimal - <int> <int>.<frac> <int>E<exp> <int>.<frac>E<exp> 
+; ---------------------------------------------------------------
+; r5=>after first digit
+; NB: E<exp> parsed correctly, but fnPower only does positive powers.
+;
+.EvalDecimal
+dec  r5			; Point back to first digit
+.EvalDecimal2
+jsr  pc,EvalDecimalInt	; Evaluate decimal string
+cmpb r0,#ASC"."
+bne  EvalCheckExponent	; Not '.', check for 'E'
+inc  r5			; Step past '.'
+jsr  pc,EnsureFloat
+
+; Parse fractional digits
+; -----------------------
+.EvalFraction
+mov  r3,-(sp)
+mov  r4,-(sp)
+mov  r2,-(sp)		;            acc=num   sp=>num
+clr  r4
+clr  r3
+mov  #&80,r2		;            acc=1     sp=>num
+.EvalFractionLp		;            acc=1     sp=>num
+mov  r3,-(sp)
+mov  r4,-(sp)
+mov  r2,-(sp)		; stack:     acc=1     sp=>1, num
+mov  #&CCCD,r4
+mov  #&4CCC,r3
+mov  #&007C,r2		;            acc=1/10  sp=>1,   num
+jsr  pc,fnMultiply	; multiply:  acc=1/10  sp=>num
+tst  -(sp)		;            acc=1/10  sp=>xxx, num
+jsr  pc,SwapStack	; swap:      acc=num   sp=>xxx, 1/10
+mov  6(sp),-(sp)
+mov  6(sp),-(sp)
+mov  6(sp),-(sp)
+tst  -(sp)		; dup:       acc=num   sp=>xxx,  1/10, xxx, 1/10
+jsr  pc,SwapStack	; swap:      acc=1/10  sp=>xxx,  num,  xxx, 1/10
+tst  (sp)+		;                      sp=>num,  xxx,  1/10
+mov  r3,-(sp)		;                      sp=>x,    num,  xxx, 1/10
+;mov  r3,(sp)
+mov  r4,-(sp)		;                      sp=>xx,   num,  xxx, 1/10
+mov  r2,-(sp)		; stack:     acc=1/10  sp=>1/10, num,  xxx, 1/10
+jsr  pc,FetchCheckDigit	; Get next digit
+bcs  EvalFractionDone
+bic  #&FFF0,r0
+mov  r0,r4
+clr  r3
+clr  r2			;            acc=d         sp=>1/10, num, xxx, 1/10
+jsr  pc,fnMultiply	; multiply:  acc=d/10      sp=>num,  xxx, 1/10
+mov  #&80,r0		; b7=1, not compare
+jsr  pc,fnAdd		; add:       acc=num+d/10  sp=>xxx,  1/10
+jsr  pc,SwapStack	; swap:      acc=1/10      sp=>xxx,  num+d/10
+tst  (sp)+		;            acc=1/10      sp=>num+d/10
+br   EvalFractionLp
+
+.EvalFractionDone	;            acc=1/10      sp=>1/10, num,  xxx, 1/10
+add  #6,sp		; Drop 1/10
+mov  (sp)+,r2		; Pop stacked number
+mov  (sp)+,r4
+mov  (sp)+,r3
+add  #8,sp		; Drop xxx and 1/10
+dec  r5			; Point to terminating character
+.EvalCheckExponent
+bic  #&20,r0
+cmpb r0,#ASC"E"		; Check for E<num>
+bne  EvalExponentDone	; Return with <num>
+;.EvalExponent
+inc  r5			; Step past 'E'
+jsr  pc,EnsureFloat	; Ensure floating point format
+mov  r3,-(sp)
+mov  r4,-(sp)
+mov  r2,-(sp)		; Stack number
+jsr  pc,EvalDecimalPrefix ; Evalute integer exponent
+clr  -(sp)
+mov  #10,-(sp)
+clr  -(sp)		; Stack 10
+jsr  pc,fnPower		; Do 10^(exponent) - NB Power currently only does +ve powers
+jsr  pc,fnMultiply	; Do 10^(exponent) * <decimal>
+.EvalExponentDone
+tst  r2			; Set flags
+rts  pc
+
+.EvalTimes10		; r3:r4=r3:r4*10, corrupts r1,r2
+mov r4,r2
+mov r3,r1
+clc
+rol r4
+rol r3			; r3:r4=*2
+rol r4
+rol r3			; r3:r4=*4
+add r2,r4
+adc r3
+add r1,r3		; r3:r4=*5
+rol r4
+rol r3			; r3:r4=*10
+;.EvalTimes10Over
+rts pc			; CC=number ok, CS=too big
+
+

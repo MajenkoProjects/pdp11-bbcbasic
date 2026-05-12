@@ -1,0 +1,424 @@
+; > CommonIO
+; Common host interface routines for hosts that do not implement BBC API functionality.
+; 09-Apr-2024 Added *BASIC command
+
+
+; OSCLI - Execute command
+; =======================
+
+; Built-in *commands
+; ------------------
+.IO_CLIcmds
+;.UX_CLIcmds
+equb &FF
+equb "basic",&8E
+equb "chdir",&86
+equb "cd"   ,&86
+equb "esc"  ,&8C
+equb "fx"   ,&80
+equb "help" ,&82
+equb "load" ,&88
+equb "quit" ,&84
+equb "save" ,&8A
+;"run",&90
+equb 0
+align
+
+.IO_CLIaddrs
+equw IO_CLIhost	; *fx
+equw CLIhelp	; *help
+equw IO_QUIT0	; *quit
+equw CLIchdir	; *chdir, *cd
+equw CLIload	; *load
+equw CLIsave	; *save
+equw CLIesc	; *esc
+equw CLIbasic	; *basic
+
+
+; OSCLI - Execute command
+; =======================
+; On entry, r0=>command string
+; On exit,  r0=return status
+;
+.IO_OSCLI
+mov  r1,-(sp)		; Save R1
+.IO_CLIlp1
+movb (r0)+,r1
+cmpb r1,#ASC"*"		; Skip stars
+beq  IO_CLIlp1
+cmpb r1,#ASC" "		; Skip spaces
+beq  IO_CLIlp1
+cmpb r1,#13
+beq  IO_CLInull		; Null string
+cmpb r1,#ASC"|"
+beq  IO_CLInull		; Comment
+cmpb r1,#ASC"/"
+beq  IO_CLIexternal	; */filename
+dec  r0			; Point back to non-space non-star char
+mov  r0,-(sp)		; Save address after '*'s and ' 's
+mov  r2,-(sp)		; Save R2
+mov  #IO_CLIcmds,r2	; Point to command table
+
+.IO_CLIlp2
+tstb (r2)+
+bpl  IO_CLIlp2		; Look for start of table entry
+tstb (r2)		; End of command table?
+bne  IO_CLIcmd		; Not end, check if matching command
+mov  (sp)+,r2		; Restore R2
+mov  (sp)+,r0		; r0=>command string
+.IO_CLIexternal
+cmpb (r0)+,#ASC" "	; Skip any spaces after */
+beq  IO_CLIexternal
+dec  r0
+jmp  IO_CLIslash	; End of table or */, try passing to system()
+
+.IO_CLIcmd
+mov  2(sp),r0		; Get start of command line
+.IO_CLIlp3
+movb (r0)+,r1		; Get command line character
+bis  #&20,r1		; Force to lower case
+cmpb (r2)+,r1		; Compare with table
+beq  IO_CLIlp3		; Characters match, check next
+dec  r0			; Point to non-matching command char
+dec  r2			; Point to non-matching table char
+cmpb (r0),#ASC"A"	; Check last character tested
+bcc  IO_CLIlp2		; Not end of command string, try next command
+movb (r2),r1
+bpl  IO_CLIlp2		; Not end of table entry, try next one
+mov  (sp)+,r2		; Restore R2
+.IO_CLIlp4
+cmpb (r0)+,#ASC" "	; Skip trailing spaces
+beq  IO_CLIlp4
+dec  r0
+
+; Command matched
+; r0=><cr> or <non-spc> after command
+; r1=&80+n command number
+; sp=>R0, R1
+
+bic  #&FF80,r1		; Drop bit 7 and bit 0
+mov  IO_CLIaddrs(r1),r1
+jsr  pc,(r1)		; Errors never return
+;bvs  IO_CLIerror	; Restore and return with error
+tst  (sp)+		; Drop start of command
+.IO_CLInull
+mov  (sp)+,r1		; Restore R1
+clr  r0			; Return R0=Ok
+rts  pc
+;.IO_CLIerror
+;tst  (sp)+		; Drop start of command
+;mov  (sp)+,r1		; Restore R1
+;setv			; Set V
+;rts  pc
+
+
+; Common commands
+; ===============
+
+; *help
+; -----
+.CLIhelp
+mov  #StartupMessage,r1
+jsr  pc,PrintR1
+#ifdef RT11VER
+ jsr  pc,PrintInline
+ equs "RT11 Host v"
+ equb ((RT11VER >> 8) AND 15)+48
+ equb "."
+ equb ((RT11VER >> 4) AND 15)+48
+ equb (RT11VER AND 15)+48
+ equb 13,0
+ align
+#endif
+.IO_CLIhost
+#if OSNAME$="Unix"
+#ifndef NOEMT
+ mov  2(sp),r0		; Get R0=>command
+ emt  1			; Pass on to host
+#endif
+#endif
+rts pc
+
+; *esc (on|off)
+; -------------
+.CLIesc
+cmpb (r0)+,#ASC"@"	; Check for 'O'...
+bcs  CLIescOn
+movb (r0),r1		; Check for 'oN'.. or 'oF'...
+			;            %1110 or %0110
+.CLIescOn
+rol  r1			; Move to bit 4
+add  #FLG_ESCAPE,r1	; Toggle bit 4
+bic  #-FLG_ESCAPE-1,r1	; Keep bit 4, N/F
+bicb #FLG_ESCAPE,SV_SYS	; Remove bit 4 from flags
+bisb r1,SV_SYS		; Insert into system flags
+rts pc
+
+; *basic
+; ------
+.CLIbasic
+adr  SV_STRING,r1
+mov  r0,r5
+jsr  pc,InsAddLine	; Copy any command line
+mov  SV_MEMTOP,r1	; Get memory limits
+mov  SV_MEMBOT,r0
+jmp  Restart		; Restart
+
+; *quit
+; -----
+;.CLIquit
+;jmp IO_QUIT0
+
+; *load
+; -----
+.CLIload
+jsr  pc,ScanAddrsR0
+dec  r0
+bmi  CLILoad1		; *load name
+beq  CLILoad1		; *load name addr
+.jmpBadAddress
+jmp  errBadAddress
+.CLILoad1
+movb r0,MOS_BUF+6	; &FF=use file's addr or &00=use supplied addr
+mov  #&FF,r0		; R0=LOAD
+.CLIFile
+mov  #MOS_BUF,r1
+jmp  IO_FILE		; Error will be caught before return
+
+; *save
+; -----
+.CLIsave
+jsr  pc,ScanAddrsR0
+cmp  r0,#2		; *save name
+bcs  jmpBadAddress	; *save name addr
+cmp  r0,#5
+bcc  jmpBadAddress	; *save too many addresses
+clr  r0			; R0=SAVE
+br   CLIFile
+
+; Scan a list of file addresses
+; -----------------------------
+.ScanHex2
+mov  #MOS_BUF+2,r1
+.ScanHex
+; Would this be smaller to do manually?
+mov  r0,-(sp)
+mov  r1,-(sp)
+jsr  pc,CheckHexNext
+bcs  jmpBadAddress
+;
+;; Call BASIC's evaluator
+;; R0=  first hex digit
+;; R1=4 -> 4 bits per digit
+;; R3=0 -> accumulator
+;; R4=0 -> accululator
+;; R5=> first digit, already checked
+;mov  #4,r1
+;clr  r3
+;clr  r4
+;jsr  pc,EvalHexGo
+;; R3/R4=hex value
+;; R5=>first non-hex character
+;
+; Call BASIC's evaluator
+; R3=0 -> accumulator
+; R4=0 -> accululator
+; R5=> first digit, already checked
+clr r3			; Clear accumulator
+clr r4
+dec r5			; Back up R5 to first digit
+jsr pc,EvalHexGo
+; R0/R1/R2 corrupted
+; R3/R4=hex value
+; R5=>first non-hex character
+;
+mov  (sp)+,r1
+mov  r4,(r1)+
+mov  r3,(r1)
+mov  (sp)+,r0
+.ScanHexSpc
+cmpb (r5)+,#ASC" "
+beq  ScanHexSpc
+dec  r5
+cmpb (r5),#13
+rts  pc
+
+.ScanAddrsR0
+mov  r0,r1		; r0=>command line
+.ScanAddrs
+mov  r5,-(sp)
+mov  r4,-(sp)
+mov  r3,-(sp)
+mov  r2,-(sp)
+mov  r1,r5		; r1=>command line
+mov  r1,MOS_BUF		; filename
+jsr  pc,SkipWord
+clr  r0
+cmpb (r5),#13
+beq  ScanAddrsDone	; No addresses
+inc  r0
+jsr  pc,ScanHex2	; BUF+2 = load
+mov  r4,MOS_BUF+6	; BUF+6 = exec
+mov  r3,MOS_BUF+8
+mov  r4,MOS_BUF+10	; BUF+10= start
+mov  r3,MOS_BUF+12
+cmpb (r5),#13
+beq  ScanAddrsDone	; One address
+inc  r0
+mov  #MOS_BUF+14,r1
+cmpb (r5),#ASC"+"
+bne  ScanHexEnd
+inc  r5
+jsr  pc,ScanHexSpc
+jsr  pc,ScanHex		; BUF+14=length
+add  MOS_BUF+10,r4
+adc  r3
+add  MOS_BUF+12,r3
+mov  r4,MOS_BUF+14
+mov  r3,MOS_BUF+16
+cmpb (r5),#13
+br   ScanHexEnd2
+.ScanHexEnd
+jsr  pc,ScanHex		; BUF+14=end
+.ScanHexEnd2
+beq  ScanAddrsDone	; Two address
+inc  r0
+mov  #MOS_BUF+6,r1
+jsr  pc,ScanHex		; BUF+6 = exec
+beq  ScanAddrsDone	; Three address
+inc  r0
+jsr  pc,ScanHex2	; BUF+2 = load
+beq  ScanAddrsDone	; Four address
+inc  r0			; Five or more addresses
+.ScanAddrsDone
+mov  (sp)+,r2
+mov  (sp)+,r3
+mov  (sp)+,r4
+mov  (sp)+,r5
+rts  pc
+
+.SkipWord
+cmpb (r5)+,#ASC"!"
+bcc  SkipWord
+dec  r5
+br   ScanHexSpc
+
+
+; Support routines
+; ================
+
+; Get word from control block at r2 and add r3 to it, return r2=r2+4
+; ------------------------------------------------------------------
+.FetchAddStore
+jsr  pc,FetchWord
+add  r3,r1
+adc  r0			; Continue into StoreWord
+
+; Store &r0:r1 to unaligned buffer at r2, r1=lo r0=hi, corrupts r0/r1, return r2=r2+4
+; -----------------------------------------------------------------------------------
+.StoreWord
+movb r1,(r2)+
+swab r1
+movb r1,(r2)+
+movb r0,(r2)+
+swab r0
+movb r0,(r2)+
+rts  pc
+
+; Fetch &r0:r1 from unaligned buffer at r2, r1=lo r0=hi, return r2=r2+4
+; ---------------------------------------------------------------------
+.FetchWord
+jsr  pc,FetchHalfWord
+mov  r0,-(sp)
+jsr  pc,FetchHalfWord
+mov  (sp)+,r1
+rts  pc
+
+; Get 16-bit half-word from unaligned r2 to r0, return r2=r2+2
+; ------------------------------------------------------------
+.FetchHalfWord
+movb (r2)+,r1
+bic  #&FF00,r1
+movb (r2)+,r0
+bic  #&FF00,r0
+swab r0
+bis  r1,r0
+rts  pc
+
+; Read line of text
+; -----------------
+; On entry, R1=>address of memory to read string to
+; On exit,  R2=length of string
+;           CC=ok, CS=Escape pressed
+;
+; Could do in-line cursor movement
+;
+.IO_WORD0
+mov  r1,-(sp)		; Save pointer to control block
+mov  r3,-(sp)		; Save R3
+mov  r1,r2		; r2=>control block
+jsr  pc,FetchWord	; Get pointer to text buffer to r1
+clr  r2			; Zero number of characters read
+.RdLnLoop
+jsr  pc,IO_RDCH		; Get a character
+bcs  RdLnEsc		; Escape state
+cmp  r0,#13
+beq  RdLnCR		; <CR> - End of line
+cmp  r0,#10
+beq  RdLnCR		; <LF> - End of line
+cmp  r0,#21
+beq  RdLnU		; Ctrl-U - delete line
+cmp  r0,#&C7
+beq  RdLnDel		; <DEL> - del a character
+cmp  r0,#127
+beq  RdLnDel		; <DEL> - del a character
+cmp  r0,#8
+beq  RdLnDel		; <BS> - del a character
+cmp  r0,#ASC" "
+;bcs  RdLnLoop		; Ignore other control characters
+bcs  RdLnIgnore		; Just echo other control characters
+cmp  r2,#240
+bcc  RdLnLoop		; No more room for characters
+movb r0,(r1)+		; Put character into memory
+inc  r2			; Inc. number of characters
+.RdLnIgnore
+jsr  pc,IO_WRCH		; Output the character
+br   RdLnLoop		; Go back for another
+;
+.RdLnU
+mov  r2,r3		; We want to delete all characters
+br   RdLnDelete
+.RdLnDel
+mov  #1,r3		; We only want to delete one char
+.RdLnDelete
+mov  #&2008,r0		; Output <DEL> by backspacing
+.RdLnDeleteLp
+tst  r2			; Check line length
+beq  RdLnLoop		; Length=0, jump back to main loop
+jsr  pc,IO_WRCH		; <bs>
+swab r0
+jsr  pc,IO_WRCH		; <spc>
+swab r0
+jsr  pc,IO_WRCH		; <bs> again
+;mov  #8,r0		; Output <DEL> by backspacing
+;jsr  pc,IO_WRCH
+;mov  #32,r0
+;jsr  pc,IO_WRCH
+;mov  #8,r0
+;jsr  pc,IO_WRCH
+dec  r1			; Back address pointer
+dec  r2			; Dec character counter
+dec  r3			; Dec. number of DELs to do
+bne  RdLnDeleteLp	; Loop for each to delete
+br   RdLnLoop		; Go back into ReadLine loop
+;
+.RdLnCR
+jsr  pc,IO_NEWL		; Returns with r0=<cr>
+movb r0,(r1)		; Put <CR> terminator in
+clr  r0			; Restore R0, clear C
+.RdLnEsc
+.RdLnExit
+mov  (sp)+,r3		; Restore R3
+mov  (sp)+,r1		; Get buffer address back, clear V
+rts  pc			; r0=0, r1=buffer, r2=length
+

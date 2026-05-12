@@ -1,0 +1,1967 @@
+; > Commands
+; BASIC commands
+
+; 09-Feb-2008: Removed 80-BF from command table, OFF/ERROR/EXT checked for explicitly
+;              Started writing cmdON to split between subfunctions
+;              Started work on PRINT - comma doesn't work, rest untested
+; 12-Feb-2008: PRINT works, including all print formatters!
+; 04-Sep-2008: LIST, REPEAT/UNTIL, GOTO/GOSUB/RETURN, RESTORE, IF, TRACE
+; 09-Mar-2009: GOTO/GOSUB/RESTORE search for destination line
+; 05-Nov-2009: RESTORE [DATA|ERROR], LOCAL [DATA|ERROR], ENDPROC, =
+; 08-Nov-2009: PROC(addr%), FN(addr%)
+; 15-May-2010: LET stores numbers
+; 24-Jun-2011: DELETE checks for &C7xx double tokens
+; 31-Jan-2012: String assigment, doesn't yet reclaim lost string space
+;              DIM var size  done.
+;              DIM var(etc) tries to find a variable called var(etc)
+;              Assign reduces real to int if int%=real
+; 28-Jun-2013: PRINT# done.
+; 20-Nov-2013: FOR/NEXT done. HIMEM checks moving will leave some free memory.
+; 04-Dec-2013: Stacked loops/calls don't stack duplicate cmdret, loops step past any
+;              null start of loop (eg REPEAT<cr> steps to next line)
+; 07-Dec-2013: READ done, including reading raw strings. PROC/FN calls, ENDPROC/= return.
+;              PROC/FN only without parameters. Need to check layout of stacked local
+;              variables.
+; 09-Dec-2013: FN/PROC lookup moved to Variables, callable by ^PROC/^FN. DIM space.
+; 13-Dec-2013: FN/PROCname(params) working - LOCAL not working properly.
+;              Stacked data struture needs tweeking to combine size+type
+; 24-Dec-2013: SubCall/SubReturn stacks and pops data with combined size+type
+;              LOCAL [DATA][ERROR][variables] working, and popped off correctly
+;              RESTORE [DATA][ERROR], RESTORE +<linenum>
+; 31-Dec-2013: INPUT, INPUT# done, replaced "Unimplemented command" message with error.
+; 03-Jan-2014: AUTO checks program consistancy in case of Bad program.
+; 28-Jan-2014: LIST takes parameters, generalised line number parsing routine.
+; 05-Feb-2014: DIM array() seems to work. Needs some further testing.
+;              =<value> copies returned string to buffer before unstacking what could be
+;              a localised version of the same string.
+; 31-Aug-2015: Low numbered commands use lookup table instead of loads of CMPs.
+; 07-Sep-2015: ON GOTO/GOSUB implemented. DIM fails with more than one dimension.
+; 12-Oct-2015: TRACE ON|OFF steps r5 past ON|OFF.
+; 28-Jun-2017: FOR/NEXT have loop type on stack correct way around.
+; 23-Apr-2020: PRINT preserves R1 at this level, allows NumberToString to corrupt everything.
+; 13-Mar-2021: LIST doesn't detokenise within strings. *BUG* Detokensises after REM.
+; 07-Jan-2022: Bugfix added to avoid bug in RT11Em.
+; 03-Oct-2023: Unwinding from FN drops subroutines addresses when resetting SV_STACK.
+; 12-Mar-2024: CallSub/RetSub pushes/pops SV_STACK - optimised code and fixed unwinding bug.
+; 18-Mar-2024: HIMEM= sets SV_STACK, lots of small misc. optimisations.
+; To do: LIST ,n and LIST n, don't detokenised after REM.
+; To do: If oldstring+len=VAREND, extend newstring into VAREND. - has this already been done?
+
+
+; Command address table
+; =====================
+; On entry to command subroutines,
+;  r5=>next character, spaces not skipped
+;  r0=(token-&C6)*2
+;  r1=dispatch address
+;
+.CommandTable
+EQUW cmdAUTO-$		; &C6 - AUTO
+EQUW cmdDELETE-$	; &C7 - DELETE and double-byte immediate commands
+EQUW cmdLOAD-$		; &C8 - LOAD and double-byte program commands
+EQUW cmdLIST-$		; &C9 - LIST
+EQUW cmdNEW-$		; &CA - NEW
+EQUW cmdOLD-$		; &CB - OLD
+EQUW cmdRENUMBER-$	; &CC - RENUMBER
+EQUW cmdSAVE-$		; &CD - SAVE
+EQUW cmdPUT-$		; &CE - PUT
+EQUW cmdPTR-$		; &CF - PTR
+EQUW cmdPAGE-$		; &D0 - PAGE
+EQUW cmdTIME-$		; &D1 - TIME
+EQUW cmdLOMEM-$		; &D2 - LOMEM
+EQUW cmdHIMEM-$		; &D3 - HIMEM
+EQUW cmdSOUND-$		; &D4 - SOUND
+EQUW cmdBPUT-$		; &D5 - BPUT
+EQUW cmdCALL-$		; &D6 - CALL
+EQUW cmdCHAIN-$		; &D7 - CHAIN
+EQUW cmdCLEAR-$		; &D8 - CLEAR
+EQUW cmdCLOSE-$		; &D9 - CLOSE
+EQUW cmdCLG-$		; &DA - CLG
+EQUW cmdCLS-$		; &DB - CLS
+EQUW cmdDATA-$		; &DC - DATA
+EQUW cmdDEF-$		; &DD - DEF
+EQUW cmdDIM-$		; &DE - DIM
+EQUW cmdDRAW-$		; &DF - DRAW
+EQUW cmdEND-$		; &E0 - END
+EQUW cmdENDPROC-$	; &E1 - ENDPROC
+EQUW cmdENVELOPE-$	; &E2 - ENVELOPE
+EQUW cmdFOR-$		; &E3 - FOR
+EQUW cmdGOSUB-$		; &E4 - GOSUB
+EQUW cmdGOTO-$		; &E5 - GOTO
+EQUW cmdGCOL-$		; &E6 - GCOL
+EQUW cmdIF-$		; &E7 - IF
+EQUW cmdINPUT-$		; &E8 - INPUT
+EQUW cmdLET-$		; &E9 - LET
+EQUW cmdLOCAL-$		; &EA - LOCAL
+EQUW cmdMODE-$		; &EB - MODE
+EQUW cmdMOVE-$		; &EC - MOVE
+EQUW cmdNEXT-$		; &ED - NEXT
+EQUW cmdON-$		; &EE - ON
+EQUW cmdVDU-$		; &EF - VDU
+EQUW cmdPLOT-$		; &F0 - PLOT
+EQUW cmdPRINT-$		; &F1 - PRINT
+EQUW cmdPROC-$		; &F2 - PROC
+EQUW cmdREAD-$		; &F3 - READ
+EQUW cmdREM-$		; &F4 - REM
+EQUW cmdREPEAT-$	; &F5 - REPEAT
+EQUW cmdREPORT-$	; &F6 - REPORT
+EQUW cmdRESTORE-$	; &F7 - RESTORE
+EQUW cmdRETURN-$	; &F8 - RETURN
+EQUW cmdRUN-$		; &F9 - RUN
+EQUW cmdSTOP-$		; &FA - STOP
+EQUW cmdCOLOUR-$	; &FB - COLOUR
+EQUW cmdTRACE-$		; &FC - TRACE
+EQUW cmdUNTIL-$		; &FD - UNTIL
+EQUW cmdWIDTH-$		; &FE - WIDTH
+EQUW cmdOSCLI-$		; &FF - OSCLI
+EQUW errMistake-$	; &100 - Used for unsupported commands -> Mistake
+
+; Low numbered tokens and characters used as commands
+EQUW cmdStar-$		; &101 - &2A - *
+EQUW cmdEquals-$	; &102 - &3D - =
+EQUW cmdAssem-$		; &103 - &5B - [
+EQUW cmdERROR-$		; &104 - &85 - ERROR
+EQUW cmdOFF-$		; &105 - &87 - OFF
+EQUW cmdELSE-$		; &106 - &8B - ELSE
+EQUW cmdGOTO-$		; &107 - &8C - THEN
+EQUW cmdGOTO1-$		; &108 - &8D - LINENUM
+EQUW cmdEXT-$		; &109 - &A2 - EXT
+
+.cmdPUT
+.cmdRENUMBER
+.errMistake
+jsr pc,Error
+equb 4,"Mistake",0
+
+; Here to take advantage of alignment
+.CommandBytes
+EQUB ASC"*" -&C6,ASC"=" -&C6,ASC"["    -&C6,tknERROR-&C6,tknOFF-&C6
+EQUB tknELSE-&C6,tknTHEN-&C6,tknLINENUM-&C6,tknEXT  -&C6
+ALIGN
+
+; Here to be near some branches
+.EnsureEndStatement
+jsr  pc,CheckEndStatement
+beq  cmdREADok
+.errSyntax
+jsr pc,Error
+equb 16,"Syntax error",0
+align
+
+
+; READ var[,var...]
+; =================
+.cmdREADlp1
+.cmdREAD
+mov  SV_DATA,r1		; Get current DATA pointer
+cmpb (r1),#ASC","
+beq  cmdREAD1		; Pointing to next item
+movb #tknDATA,r0
+jsr  pc,TokenFind	; Look for next DATA line
+bcc  errNoDATA		; No more DATA
+dec  r1
+.cmdREAD1
+inc  r1			; Step past comma in DATA
+mov  r1,-(sp)		; Save DATA pointer
+jsr  pc,VarFindCreate	; Parse and create variable
+mov  (sp)+,r1		; Get DATA pointer back
+mov  r5,-(sp)		; Save LPTR
+mov  r1,r5		; Point to DATA item
+.cmdREADspc
+cmpb (r5)+,#ASC" "	; Skip spaces in DATA
+beq  cmdREADspc
+dec  r5
+cmpb (r5),#34		; Does DATA item starts with a quote?
+beq  cmdREAD2		; Quoted string, evaluate it
+tst  r3			; Check type of variable
+bpl  cmdREAD2		; Not reading to a string variable
+
+; Read raw string from program code
+; ---------------------------------
+mov  r4,r0		; Move address of string block to r0
+mov  r5,r1		; r1=>source string
+mov  #&7FFF,r2		; r2= string length-1
+.cmdREADlp2
+inc  r2			; Increment length
+movb (r5)+,r3		; Check character
+cmpb r3,#13
+beq  cmdREADraw
+cmpb r3,#ASC","
+bne  cmdREADlp2		; Look for end of raw string
+.cmdREADraw
+dec  r5			; Point back to ',' or <cr>
+jsr  pc,cmdAssignString2 ; Assign raw string
+br   cmdREAD3
+
+; Evaluate data item
+; ------------------
+.cmdREAD2
+jsr  pc,cmdAssign3	; Evaluate and assign
+
+; Update DATA pointer and loop for next
+; -------------------------------------
+.cmdREAD3
+mov  r5,SV_DATA		; Update DATA pointer
+mov  (sp)+,r5		; Get LPTR back
+jsr  pc,SkipSpaceNext
+cmpb r0,#ASC","
+beq  cmdREADlp1		; Do next item
+dec  r5			; Could all these decr5/rts be combined?
+.cmdREADok
+rts  pc
+.errNoDATA
+jsr  pc,Error
+equb 42,"Out of ",tknDATA,0
+align
+
+
+; Assign data to variable
+; -----------------------
+; r0=data address
+; r1=data size/type
+; r2/r3/r4=data
+;
+.cmdAssignData
+mov  r0,-(sp)		; Stack destination address
+mov  r1,-(sp)		; Stack destination type
+br   cmdAssign4
+
+; [LET] var=expression
+; ====================
+.cmdLET
+jsr pc,SkipSpaceThis
+.cmdAssign
+jsr pc,VarFindCreate1	; Look for variable, create if nonexistant
+;bcs errSyntax		; Bad variable name, give error (done in VarFindCreate)
+			; r4=address, r3=type/data size
+.cmdAssign2
+;jsr  pc,SkipSpaceThis ; could be Next
+jsr  pc,SkipSpaceNext
+cmpb r0,#ASC"="
+bne  errMistake
+;inc  r5
+.cmdAssign3
+bit  #&4000,r3
+bne  errSyntax		; Can't do array()=
+mov  r4,-(sp)		; Stack destination address
+mov  r3,-(sp)		; Stack destination type
+jsr  pc,Evaluate	; Evalute following expression
+			; r4/r3/r2=value
+
+; 0(sp)=%00000000x - number=
+; 0(sp)=%01000000x - number()=
+; 0(sp)=%10000000x - string=
+; 0(sp)=%10000001x - $string=
+; 0(sp)=%10000010x - $$string=
+; 0(sp)=%11000000x - string()=
+;
+; r2=%0xxxx - =number
+; r2=%1xxxx - =string
+
+.cmdAssign4
+mov  (sp),r0		; r0=%txxxxxxxx, type of destination
+xor  r2,r0		; r0=%Txxxxxxxx, type of source
+bmi  jmpTypeMismatch	; Types don't match
+mov  (sp)+,r0		; Destination Type/Size
+bmi  cmdAssignString	; b31=1, string
+mov  (sp)+,r1		; Destination address
+
+.cmdAssignNumber
+; r0=data size 1, 4 or 5
+; r1=>data block
+; r2/r3/r4=value
+;
+cmp  r0,#5
+beq  cmdAssignNumber1	; Integer and Real will fit into Real
+jsr  pc,EnsureInteger	; Reduce Real to fit into Integer
+.cmdAssignNumber1
+movb r4,(r1)+		; Store first byte
+dec  r0
+beq  cmdAssignDone	; Byte store
+swab r4
+movb r4,(r1)+		; Store three more bytes
+; add update here to be able to store arbitary number of bytes, eg 1, 2, 4, 5
+movb r3,(r1)+
+swab r3
+movb r3,(r1)+
+;swab r4		; Restore r3 and r4 - these moved out to cmdNEXT as that's
+;swab r3		; the only place that needs r3/r4 preserved
+cmp  r0,#4
+bne  cmdAssignDone	; Not float store
+movb r2,(r1)		; Store fifth byte to float dest 
+.cmdAssignDone
+rts  pc
+.jmpTypeMismatch
+jmp  errTypeMismatch
+
+; <stringvar>=<string>
+; --------------------
+; r0=%10000000(0) - string    (sp)=>string info block  r3=length  r4=source address
+; r0=%10000001(0) - $string   (sp)=>string             r3=length  r4=source address
+; r0=%10000010(0) - $$string  (sp)=>string             r3=length  r4=source address
+; r0=%11000000(0) - string()  (sp)=>string info block  r3=length  r4=source address
+.cmdAssignString
+bis r0,r3		; r3=(type.hi) OR (length.lo)
+mov r3,r2		; r2=(type.hi) OR (length.lo)
+mov r4,r1		; r1=>source
+mov (sp)+,r0		; r0=>destination
+.cmdAssignString2
+; r0=destination address (string info block or absolute string base)
+; r1=>source string
+; r2=&8x00+string length
+; r3=temp
+;
+bit  r2,#&0300
+bne  cmdAbsString	; $addr or $$addr
+bic  #&FF00,r2		; r2=length
+mov  (r0),r4		; r4=>string data
+			; r3=temp
+			; r2=string length
+			; r1=>source string
+			; r0=>string info block
+cmpb 3(r0),r2		; Compare length with allocated length
+bcc  cmdStringStore	; New length <= allocated length, store it
+;
+; We now leak memory here as we throw away the old string buried in the heap and add a new string
+; to the end of the heap. We should examine the current string block to see if this string ends
+; at VAREND, and so just extend it in place. Even better (but slower) is to keep the old string
+; space in a list and look through it for space to reuse.
+;
+mov  r2,-(sp)		; Save new length
+add  #8,r2		; Add 8 to required length - should round to even number
+cmp  r2,#&100
+bcs  cmdStringNot255
+mov  #255,r2		; Maximum 255 bytes
+.cmdStringNot255
+mov  SV_VAREND,r4	; Location of new string data
+mov  r4,r3
+add  r2,r3		; r2=VAREND+required length
+cmp  r3,sp
+bcs  cmdStringNew
+.jmpNoRoom
+jmp  errNoRoom
+.cmdStringNew
+inc  r3
+bic  #1,r3		; Ensure aligned
+mov  r3,SV_VAREND	; Update end of heap
+; r4=>new string data
+; r3=new VAREND
+; r2=max string length
+; r1=source string
+; r0=>string info block
+mov  r4,(r0)		; Store address of string data
+movb r2,3(r0)		; Store max string length
+mov  (sp)+,r2		; Get new length back
+;
+.cmdStringStore
+movb r2,2(r0)		; Set string length
+beq  cmdStringDone	; Zero-length string, nothing to do
+.cmdStringLp
+movb (r1)+,(r4)+	; Copy characters to string data
+dec  r2
+bne  cmdStringLp	; Loop until all done
+.cmdStringDone
+rts  pc
+.cmdAbsString
+bit  r2,#&00FF
+beq  cmdAbsDone		; Zero-length string
+movb (r1)+,(r0)+	; Copy character
+dec  r2
+br   cmdAbsString	; Loop for all characters
+.cmdAbsDone
+bit  #&0100,r2
+beq  cmdAbsZero
+movb #13,(r0)		; $addr terminated with <cr>
+rts  pc
+.cmdAbsZero
+clrb (r0)		; $$addr terminated with <00>
+rts  pc
+
+
+; DIM [variable [LOCAL] size][array(dimensions)]...
+; =================================================
+.cmdDIMlp
+.cmdDIM
+jsr  pc,VarFindCreate	; Look for variable, create if nonexistant
+cmpb -1(r5),#ASC"("	; Is it DIM var(...
+beq  cmdDIMarray	; Dimension an array
+
+; Reserve space in heap
+; ---------------------
+mov  r4,-(sp)		; Stack destination address
+mov  r3,-(sp)		; Stack destination type
+jsr  pc,EvalInteger	; r3/r4=max reserved memory size
+inc  r4
+bne  cmdDIM1
+inc  r3
+.cmdDIM1		; r3/r4=size to reserve
+tst  r3
+bne  errDIMspace
+inc  r4
+bic  #1,r4		; Align number of bytes to reserve
+mov  SV_VAREND,r0	; r0=>start of reserved space
+add  r4,r0		; r0=>end of reserved space		
+bcs  errDIMspace	; VAREND+size>&FFFF
+add  #256,r1		; VAREND+size+256
+bcs  errDIMspace	; VAREND+size+256>&FFFF
+cmp  sp,r1		; Would this overlap stack?
+bcs  errDIMspace	; VAREND+size+256>sp
+;
+mov  SV_VAREND,r0	; r0=>start of reserved space
+mov  r0,r1		; r1=>start of reserved space
+add  r4,r1		; r1=>end of reserved space
+mov  r1,SV_VAREND	; Update VAREND
+mov  r0,r4		; r2/r3/r4=>start of reserved space
+clr  r3
+clr  r2
+mov (sp)+,r0		; Type/Size
+mov (sp)+,r1		; Dest
+jsr  pc,cmdAssignNumber
+.cmdDIMnext
+;jsr  pc,SkipSpaceThis ; could be Next, swap inc for dec
+jsr  pc,SkipSpaceNext
+cmpb r0,#ASC","
+beq  cmdDIMlp		; Another variable
+dec  r5			; Balance SkipSpaceNext
+;.cmdDIMdone
+rts  pc
+.cmdDIMtooBig
+; Should remove array entry from heap
+.errDIMspace
+jsr  pc,Error
+equb 11,tknDIM," space",0
+align
+
+; Dimension an array
+; ------------------
+.cmdDIMarray
+; r5=>m,n,o,p)
+; r4=>pointer to array info
+; r3=object type &8000, &0005, &0004
+;
+; Need to build:
+; r4=>dims, dim1, dim2, dim3, dim4
+;
+mov  r3,-(sp)		; Save object type
+mov  r4,-(sp)		; Save address of start of info block
+clr  -(sp)		; Save initial index to end of array
+clr  (r4)+		; Zero number of dimensions
+mov  r4,-(sp)		; Save address of first dimension
+br   cmdDIMparse
+.cmdDIMparseLp
+inc  r5			; Step past ","
+mov  r3,-(sp)		; Put offset back onto stack
+mov  r1,-(sp)		; Put pointer to next dimension onto stack
+.cmdDIMparse
+jsr  pc,EvalInteger	; Evaluate dimension
+tst  r3
+bne  cmdDIMtooBig	; sub>65535 - too big
+mov  r4,r3		; Move to R3 for multiply later
+mov  (sp)+,r1		; r1=>current dimension
+mov  r3,(r1)+		; Store current dimension
+inc  r3			; Add one to get dimension size
+mov  (sp)+,r2		; r2=current index
+beq  cmdDIMsize		; First dimension, nothing to multiply
+;
+; sp=>start of info block, type
+; r4=dimension max
+; r3=dimension size
+; r2=current index
+; r1=>next dimension
+;
+#ifndef NOMUL
+mul  r2,r3		; r3=r2*r3 - offset=offset*size
+#else
+jsr  pc,R2timesR3toR3	; r3=r2*r3 - offset=offset*size
+#endif
+bcs  cmdDIMtooBig	; offset>65535
+.cmdDIMsize
+cmpb (r5),#ASC","
+beq  cmdDIMparseLp	; Parse next dimension
+jsr  pc,CheckClose
+;
+; r3=offset to end of array
+; r1=start of array data
+; sp=>start of info block, type
+;
+mov  (sp)+,r2		; r2=>start of array info
+mov  r1,r0
+sub  r2,r1		; r1=2*(number of dimensions)+2
+asr  r1			; r1=number of dimensions+1
+dec  r1			; r1=number of dimensions
+mov  r1,(r2)		; Store number of dimensions
+mov  (sp)+,r2		; Get object type
+mov  r3,r4
+asl  r3
+bcs  cmdDIMtooBig
+asl  r3			; r3=index*4
+bcs  cmdDIMtooBig
+bit  r2,#1
+beq  cmdDIMword
+add  r4,r3		; r3=index*5
+bcs  cmdDIMtooBig
+.cmdDIMword
+add  r0,r3		; r0=start of data, r3=end of data
+inc  r3
+bic  #1,r3
+mov  r3,SV_VAREND	; Update end of heap
+.cmdDIMclear
+clr  (r0)+
+cmp  r0,r3		; Clear array data
+bcs  cmdDIMclear
+br   cmdDIMnext		; Look for next dim
+;
+.errBadDIM
+jsr  pc,Error
+equb 10,"Bad ",tknDIM,0
+align
+
+
+; ERROR [EXT] errnum,errstr$
+; ==========================
+.cmdERROR
+jsr  pc,SkipSpaceNext
+sub  #tknEXT+&FF00,r0	; ERROR EXT?
+beq  cmdERROR1
+dec  r5			; Step back
+.cmdERROR1
+mov  r0,-(sp)		; Save EXT/noEXT
+jsr  pc,EvalInteger	; Get error number
+jsr  pc,CheckComma	; Step past comma
+mov  r4,-(sp)		; Save error number
+jsr  pc,EvalString	; Get error string
+adr  SV_INPUT+254,r0	; Use command input buffer to hold error
+sub  r3,r0		; Use top end of input buffer
+bic  #1,r0		; Ensure even address
+mov  (sp)+,(r0)		; Pop error number to buffer
+;cmpb (sp)+,#tknEXT	; Is it ERROR EXT
+tst  (sp)+		; Is it ERROR EXT
+beq  cmdERRORext	; Jump to quit, returning error number
+mov  r0,-(sp)		; Save start of error block
+inc  r0			; Step past error number
+tst  r3			; Zero-length string?
+beq  cmdERRORdone	; Jump to finish
+.cmdERRORlp
+movb (r4)+,(r0)+	; Copy character to error buffer
+dec  r3			; Decrement string count
+bne  cmdERRORlp		; Loop to copy whole string
+.cmdERRORdone
+clrb (r0)		; Put terminating zero in
+mov  (sp)+,r0		; Get start of error block back
+jmp  ErrorHandler	; Jump to error handler
+.cmdERRORext
+mov  (r0),r0		; Get error number
+jmp  IO_QUIT
+
+; STOP
+; ====
+.cmdSTOP
+#ifdef DEBUG
+ jmp  IO_QUIT0
+#endif
+jsr  pc,Error
+equb 0,tknSTOP,0
+align
+
+
+; Program environment commands
+; ============================
+
+; PAGE= - Set default program start
+; ---------------------------------
+; Check for '=', evaluate integer
+; Set PAGE
+.cmdPAGE
+jsr pc,EvalEqual	; Check for '=', get integer
+bic #1,r4		; Ensure word aligned
+mov r4,SV_PAGE		; Set PAGE
+rts pc
+
+; HIMEM= - Set top of BASIC memory, clearing stack
+; ------------------------------------------------
+; Check for '=', evaluate integer
+; Check enough space
+; Set HIMEM
+; Set machine stack = HIMEM
+; Drops all subroutines
+;
+.cmdHIMEM
+jsr pc,EvalEqual	; Check for '=', get integer
+bic #1,r4		; Ensure word aligned
+;mov r4,r0
+;sub #256,r0		; Check moving HIMEM will leave some free space
+;jsr pc,CheckFreeMemR0	; Check this will leave 256+256 bytes free
+mov r4,r1
+jsr pc,CheckFreeMemR1	; Check that this will leave 256 bytes free
+mov (sp),r1		; Get cmdret
+mov r4,SV_HIMEM		; Set HIMEM
+mov r4,sp		; Reset machine stack
+clr -(sp)		; Put zero at top of stack
+mov sp,SV_STACK		; Set error stack
+jmp (r1)		; Return to execution loop
+
+; WIDTH - Set output width
+; ------------------------
+; Evaluate integer
+; Set WIDTH
+.cmdWIDTH
+jsr  pc,EvalInteger	; Get integer
+movb r4,SV_WIDTH	; Set WIDTH
+rts  pc
+
+; TRACE [ON|OFF|<linenum>]
+; ------------------------
+.cmdTRACE
+;jsr  pc,SkipSpaceThis ; could be Next
+jsr  pc,SkipSpaceNext
+clr  r4			; TRACE OFF is same as TRACE 0
+cmpb r0,#tknOFF		; Is it TRACE OFF?
+beq  cmdTRACEset	; Yes, jump to turn TRACE OFF
+;mov  #&FFFF,r4		; TRACE ON is same as TRACE 65535
+inc   r4		; TRACE ON is same as TRACE all lines from 1
+cmpb r0,#tknON		; Is it TRACE ON?
+beq  cmdTRACEset
+dec  r5			; Step back
+jsr  pc,EvalInteger	; Get line number (might end up with decr5/evalint subroutine)
+;dec  r5		; Balance following inc r5
+.cmdTRACEset
+;inc  r5		; Step past ON or OFF
+mov  r4,SV_TRACE
+rts  pc
+
+
+; Program Editing commands
+; ========================
+
+; Check for double-token editing commands
+; Only needed if extended LOAD and SAVE implemented
+; -------------------------------------------------
+#ifdef FILEEXTN
+ .cmdDELETE
+ movb (r5),r0
+ sub  #&8F,r0		; Check for double token
+ bcs  cmdDELETE1	; <&8F, continue into DELETE
+ cmp  r0,#&0C
+ bcc  cmdDELETE1	; >&9A, continue into DELETE
+ inc  r5		; Step past double token
+ adr  CommandC7,r1	; Point to replacement token bytes
+ add  r0,r1		; Index into table
+ movb (r1),r0		; Get replacement token byte
+ jmp  ExecByteCommand	; Return to dispatcher
+ .CommandC7
+ EQUB  &C6-&C6,&100-&C6,&C7-&C6, &CE-&C6	; AUTO, xx, DELETE, EDIT/PUT
+ EQUB &100-&C6, &C9-&C6,&C8-&C6,&100-&C6	; xx, LIST, LOAD, xx
+ EQUB  &CA-&C6, &CB-&C6,&CC-&C6, &CD-&C6	; NEW, OLD, RENUMBER, SAVE
+ ; Unsupported double tokens converted to tkn100 -> Syntax error
+#endif
+
+
+; AUTO - Prompt for auto line numbers
+; -----------------------------------
+.cmdAUTO
+;jsr  pc,FindTOP	; Check program consistancy
+jsr  pc,ParseLines10	; Get line number parameters, default to 10,10
+mov  r4,SV_AUTO		; Set AUTO line
+movb r3,SV_STEP		; Set AUTO step
+jsr  pc,FindTOP		; Check program consistancy, r5=>TOP-2
+			; Fall through to return to Immediate loop
+
+; DELETE - Delete lines from program
+; ----------------------------------
+#ifndef FILEEXTN
+ .cmdDELETE
+#endif
+.cmdDELETE1		; Unimplemented
+.cmdLISTend
+jmp  ImmediateLoop
+
+; LISTO - set listing options
+; ---------------------------
+.cmdLISTO
+jsr  pc,EvalInteger1	; Step past 'O' and Evaluate
+movb r4,SV_OPTIONS
+rts  pc
+
+; LIST - List program in memory
+; -----------------------------
+.cmdLIST
+cmpb (r5),#ASC"O"	; Is it LISTO?
+beq  cmdLISTO
+;jsr  pc,FindTOP	; Ensure not a Bad Program
+clr  r4			; Start line number
+mov  #&FFFF,r3		; End line number
+jsr  pc,ParseLines	; Get line number parameters
+bcs  cmdLISTstart
+mov  r4,r3		; One parameter, change to LIST r4,r4
+.cmdLISTstart
+jsr  pc,FindTOP		; Ensure not a Bad Program, r5=>TOP-2
+jsr  pc,LineFind	; Find the line in R4, terminating line in R3
+mov  r1,r5		; Point to starting line
+inc  r5			; Point to line number high byte
+.cmdLISTlp
+movb (r5)+,r4		; Get line high/terminator
+cmpb r4,#&FF
+beq  cmdLISTend		; End of program
+swab r4			; Put high byte right way around
+movb (r5)+,r0		; Get line number low byte
+inc  r5			; Step past length byte
+bic  #&00FF,r4
+bic  #&FF00,r0
+bis  r0,r4		; Merge each byte together
+;cmp  r4,r3		; Compare with end line number
+cmp  r3,r4		; Compare with end line number
+bcs  cmdLISTend		; Gone past final line
+;bcs  cmdLISTcont
+;clr  r3		; This is final line
+;.cmdLISTcont
+mov  r3,-(sp)		; Save final line number
+mov  #5,r1		; Pad decimal with 5 spaces
+.cmdLISTnumber
+jsr  pc,PrintLineNumber	; Output R4 as line number, corrupts r3,r2
+clr  r3			; R3=quote flag
+.cmdLISTbyte
+movb (r5)+,r0		; Get character from line
+cmpb r0,#13		; End of line?
+beq  cmdLISTcr
+cmpb r0,#tknLINENUM	; Inline line number?
+beq  cmdLISTline	; Keeping here shortens code
+cmpb r0,#34
+bne  cmdLISToutput	; Not a quote
+xor  r0,r3		; Toggle quote flag - tested within PrintR0TokenChar
+.cmdLISToutput
+jsr  pc,PrintR0TokenChar; Print character or token, corrupts r0,r1,r2
+br   cmdLISTbyte	; Loop for next byte
+.cmdLISTline
+jsr  pc,fnLineNum	; Get inline line number
+clr  r1			; Decimal, no padding
+br   cmdLISTnumber
+.cmdLISTcr
+jsr  pc,cmdPrintNewline	; Print newline
+jsr  pc,IO_EscapeFast	; Check for Escape bypassing any ticker
+mov  (sp)+,r3		; Get end line number back
+br   cmdLISTlp		; Loop for next line if not at end
+;bne  cmdLISTlp		; Loop for next line if not at end
+;.cmdLISTend
+;jmp  ImmediateLoop	; Jump to immediate mode
+
+
+; Stacked program loops and subroutines
+; =====================================
+
+; FOR loop=start TO limit [STEP step]
+; ===================================
+; On entry, sp=>cmdret
+; On exit,  sp=>tknFOR, step r4/r3/r2, limit r4/r3/r2:type, ^variable, saved r5
+; We don't need to check for free memory, as VarFindCreate and Evaluate checks
+;
+.cmdFOR
+jsr  pc,VarFindCreate	; Look for and create variable
+bit  #&FF00,r3
+bne  errBadFORVar	; FOR variable not a number
+mov  r4,-(sp)		; Stack address of variable's data block
+;swab r3
+mov  r3,-(sp)		; Stack variable's type 1/4/5 for byte/int/real
+jsr  pc,cmdAssign2	; Do FOR loop=start by doing loop=start
+cmpb (r5),#tknTO
+bne  errMissingTO	; Missing TO
+inc  r5			; FOR loop=start TO
+jsr  pc,EvalNumeric	; FOR loop=start TO limit
+;swab r2		; Swap exponent into top byte
+;bis  r2,(sp)		; Stack exponent:variable type
+movb r2,1(sp)		; Merge exponent with variable type
+mov  r3,-(sp)		; Stack b0-b31 of limit
+mov  r4,-(sp)
+mov  #1,r4
+clr  r3
+clr  r2			; step=1
+cmpb (r5),#tknSTEP	; Is there a STEP?
+bne  cmdFOR2		; No step, use default of 1
+inc  r5			; Step past STEP
+jsr  pc,EvalNumeric	; FOR loop=start TO limit STEP step
+.cmdFOR2
+;mov  r2,r0
+;bis  r3,r0
+;bis  r4,r0
+;beq  errStepZero	; STEP cannot be zero - STEP is allowed to be zero
+mov  r2,-(sp)		; Stack step
+mov  r3,-(sp)
+mov  r4,-(sp)
+;jsr  pc,UpdateLPTRthis	; Skip to start of loop code, r5=>current char
+jsr  pc,UpdateLPTRnext	; Skip to start of loop code, r5=>next char
+dec  r5			; r5=>current char
+mov  #tknFOR,-(sp)	; Stack FOR token
+mov  16(sp),r1		; Get cmdret
+mov  r5,16(sp)		; Store saved line pointer
+mov  sp,SV_STACK	; Set current stack context
+jmp  (r1)		; Return to execution loop
+
+.errNoFOR
+jsr  pc,Error
+equb 32,"Not in a ",tknFOR," loop",0
+align
+.errCantMatch
+jsr  pc,Error
+equb 33,"Can't match ",tknFOR,0
+align
+.errBadFORVar
+jsr  pc,Error
+equb 34,"Bad ",tknFOR," variable",0
+align
+;.errStepZero
+;jsr  pc,Error
+;equb 35,"Bad ",tknSTEP,0
+;align
+.errMissingTO
+jsr  pc,Error
+equb 36,tknMissing,tknTO,0
+align
+.jmpNoSuchVar3
+jmp  errNoSuchVar
+
+; NEXT [var[,var[...]]
+; ====================
+; On entry, sp=>cmdret, tknFOR, step r4/r3/r2, limit r4/r3/r2:type, ^variable, saved r5
+;
+.cmdNEXTlp
+;inc r5			; Step past comma
+.cmdNEXT
+cmpb 2(sp),#tknFOR
+bne  errNoFOR		; Innermost loop is not a FOR/NEXT
+mov  16(sp),r4		; Get address of variable
+;movb 15(sp),r3		; Get variable type
+movb 14(sp),r3		; Get variable type 0/4/5
+;swab r3
+;bic  #&FF00,r3
+jsr  pc,CheckEndStatement ; Any parameters?
+beq  cmdNEXT2		; Use the stacked variable
+cmp  r0,#ASC","		; Is it NEXT ,,,,
+beq  cmdNEXT2		; Use the stacked variable
+jsr  pc,VarFindExist	; Look for variable
+beq  jmpNoSuchVar3
+cmp  r4,16(sp)		; Is it the current loop?
+bne  errCantMatch	; Badly nested loop
+.cmdNEXT2
+; r4=>variable, r3=variable type/size
+jsr  pc,VarFindValNum	; Get the current value
+mov  6(sp),-(sp)	; Stack step high
+mov  6(sp),-(sp)	; Stack step low
+mov  12(sp),-(sp)	; Stack step exponent
+mov  #&88,r0		; r0='ADD'
+jsr  pc,fnAdd		; loop=loop+step
+mov  16(sp),r1		; Get address of variable
+;movb 15(sp),r0		; Get variable type
+movb  14(sp),r0		; Get variable type
+;swab r0
+;bic  #&FF00,r0
+jsr  pc,cmdAssignNumber	; Update the loop variable
+swab r4			; cmdAssignNumber returns r4/r3 byte swapped
+swab r3
+mov  12(sp),-(sp)	; Stack limit high
+mov  12(sp),-(sp)	; Stack limit low
+;mov  18(sp),r1
+;bic  #&FF00,r1
+movb 19(sp),r1		; Get limit exponent
+bic  #&FF00,r1
+mov  r1,-(sp)		; Stack limit exponent
+movb #&7B,r0		; r0=">="
+tst  12(sp) 		; Check sign of step - BUG? is this correct for floats?
+bpl  cmdNEXT3		; Positive step, do ">=" compare
+movb #&79,r0		; Negative step, do "<=" compare
+.cmdNEXT3
+jsr  pc,fnCompare
+bis  r3,r4
+beq  cmdNextDrop	; Loop completed
+mov  18(sp),r5		; Point back to start of loop
+rts  pc			; Return to execution loop
+.cmdNextDrop
+mov  (sp),18(sp)	; Move return address to top of stack entry
+add  #18,sp		; Drop this FOR/NEXT
+mov  sp,SV_STACK
+add  #2,SV_STACK	; Set stack context to outside this loop
+;jsr  pc,SkipSpaceThis ; could be Next, swap inc for dec
+jsr  pc,SkipSpaceNext
+cmpb r0,#ASC","		; Is there another FOR/NEXT variable?
+beq  cmdNEXTlp		; Loop back to test this one
+dec  r5
+rts  pc			; Drop out from FOR/NEXT loop
+
+
+; REPEAT
+; ======
+; On entry, sp=>cmdret
+; On exit,  sp=>tknREPEAT, saved r5
+; We don't need to check for free memory, as following code will end up calling Evaluate
+;
+.cmdREPEAT
+;jsr  pc,UpdateLPTRthis	; Skip to start of loop code, r5=>current char
+jsr  pc,UpdateLPTRnext	; Skip to start of loop code, r5=>next char
+dec  r5			; r5=>current char
+mov  (sp),r1		; Get cmdret
+mov  r5,(sp)		; Save line pointer
+mov  #tknREPEAT,-(sp)	; Stack REPEAT token
+mov  sp,SV_STACK	; Set current stack context
+jmp  (r1)		; Return to execution loop
+
+; UNTIL x
+; =======
+; On entry, sp=> cmdret, tknREPEAT, saved r5
+;
+.cmdUNTIL
+cmpb 2(sp),#tknREPEAT
+beq  cmdUNTILtest
+jsr  pc,Error
+equb 43,"No ",tknREPEAT,0
+align
+.cmdUNTILtest
+jsr pc,EvalInteger
+bis r3,r4		; Is it zero?
+beq cmdUNTILfalse	; UNTIL FALSE, return to REPEAT routine
+mov (sp)+,r1		; Get cmdret
+cmp (sp)+,(sp)+		; Drop tknREPEAT, savedR5
+mov sp,SV_STACK		; Set context to outside loop
+jmp (r1)		; Return to execution loop
+.cmdUNTILfalse
+mov 4(sp),r5		; Get saved r5
+rts pc			; Return to continue executing
+
+
+; RESTORE [DATA][ERROR]([+]<linenum>)
+; ===================================
+; On entry, sp=> cmdret, tknFN/PROC, tknERROR/tknDATA, savedR5
+;
+.cmdRESTORE
+mov  SV_PAGE,r1		; Default to RESTORE <start of program>
+jsr  pc,CheckEndStatement
+beq  cmdRestoreLine	; No parameter, restore to PAGE
+adr  SV_ONERR,r3	; r3=>SV_ERROR
+cmpb r0,#tknERROR
+beq  cmdRestore1	; RESTORE ERROR
+tst  (r3)+		; r3=>SV_DATA
+cmpb r0,#tknDATA
+beq  cmdRestore1	; RESTORE DATA
+#if SV_ONERR+2<>SV_DATA
+  #error SV_ONERR+2 <> SV_DATA
+#endif
+clr  r4			; Restore from start of program
+cmpb r0,#ASC"+"
+bne  cmdRESTOREline
+mov  SV_LINE,r4		; Restore from current line
+inc  r5			; Step past '+'
+.cmdRESTOREline
+jsr  pc,GetLineNumOffset ; Evaluate and look for line offset from r4
+.cmdRestoreLine
+mov  r1,SV_DATA		; RESTORE linenum
+rts  pc
+
+; RESTORE [DATA][ERROR]
+; ---------------------
+; sp=>cmdret, PROC/FN, DATA/ERROR, data ...
+;
+.cmdRestore1
+tst   2(sp)
+beq   errNotLocal	; Nothing stacked
+cmpb  4(sp),r0		; Does token match stacked token?
+bne   errNotLocal	; Popping wrong way around
+mov   (sp)+,r1		; Get return address
+mov   (sp)+,r2		; Get PROC/FN token
+tst   (sp)+		; Pop past DATA/ERROR token
+;
+mov   (sp),(r3) 	; Restore ONERR or DATA
+mov   r2,(sp)		; Restack PROC/FN token
+
+;cmpb  r0,#tknERROR
+;beq   RestoreError
+;.RestoreData
+;mov   (sp)+,SV_DATA	; Restore DATA
+;br    RestoreFinish
+;.RestoreError
+;mov   (sp)+,SV_STACK	; Restore stack context
+;mov   (sp)+,SV_ONERR	; Restore ON ERROR pointer
+;.RestoreFinish
+;mov   r2,-(sp)		; Restack PROC/FN token
+
+mov   sp,SV_STACK	; Update stack context
+jmp   (r1)
+
+;.errNoRestore
+;jsr  pc,Error
+;equb 54,tknERROR,"/",tknDATA," not ",tknLOCAL,0
+;align
+
+; LOCAL [DATA][ERROR]<variables...>
+; =================================
+; sp=> cmdret, &0000
+; sp=> cmdret, token, ....
+;
+.cmdLOCAL
+mov  (sp)+,r1		; r1=return address
+mov  (sp),r2		; Get stacked loop token
+cmpb r2,#tknFN
+beq  cmdLocal1		; Within a FN - ok
+cmpb r2,#tknPROC
+beq  cmdLocal1		; Within a PROC - ok
+.errNotLocal
+jsr  pc,Error
+equb 12,"Not ",tknLOCAL,0
+align
+.cmdLocal1
+jsr  pc,SkipSpaceNext
+adr  SV_ONERR,r3	; r3=>SV_ERROR
+cmpb r0,#tknERROR
+beq  cmdLocalError	; LOCAL ERROR
+tst  (r3)+		; r3=>SV_DATA
+cmpb r0,#tknDATA
+beq  cmdLocalData	; LOCAL DATA
+
+; LOCAL variables
+; ---------------
+dec  r5			; Balance forthcoming inc r5
+dec  r5			; Balance forthcoming inc r5
+mov  r5,r4		; Point to variable to localise
+clr  r0			; r0=0 - not PROC/FN call
+;			; r4=>variables
+;			; sp=>PROC/FN, data...
+br   cmdSubLoop		; Jump to localise variables
+
+; LOCAL [ERROR][DATA]
+; -------------------
+; sp=>PROC/FN, local data....
+; r1= return address
+;
+.cmdLocalData
+;mov  SV_DATA,(sp)	; Stack data pointer
+;br   cmdLocalExit
+.cmdLocalError
+;mov  SV_ONERR,(sp)	; Stack error handler
+;mov  SV_STACK,-(sp)	; Stack error context
+
+mov  (r3),(sp)		; Stack SVONERR or SVDATA
+
+.cmdLocalExit
+bic  #&FF00,r0		; Ensure token = &00xx
+mov  r0,-(sp)		; Stack ERROR/DATA token
+mov  r2,-(sp)		; Stack FN/PROC token
+mov  sp,SV_STACK	; Update current stack context
+jmp  (r1)		; Return to caller
+
+; =FN<name|(address)>[(parameters)]
+; =================================
+.fnFN
+mov #tknFN,r0
+br  cmdSubroutine
+
+; PROC<name|(address)>[(<parameters>)]
+; ====================================
+.cmdPROC
+mov #tknPROC,r0
+
+; Call FN/PROC subroutine
+; -----------------------
+; On entry,
+;  r0=FN or PROC token
+;  r5=>start of FN/PROC name
+;  sp=>fnret/cmdret
+; On return to Execute loop,
+;  sp=>token, {local data}, &0000, savedSVSTACK, savedLPTR, fnret/cmdret
+;
+.cmdSubroutine
+mov  r0,-(sp)		; Save FN/PROC token
+cmpb (r5),#ASC"("	; PROC( or FN( ?
+beq  cmdSubIndir	; Indirect FN/PROC call
+jsr  pc,FindSubroutine	; Find subroutine in heap or program
+br   cmdSubFound	; Jump to execute it
+
+; Indirect subroutine call
+; ------------------------
+; Syntax is A%=^PROCfred:PROC(A%)
+; A%=^PROCfred sets A%=>PROCfred's data block
+; PROC(A%) fetches destination address from location A%
+;
+.cmdSubIndir
+;jsr  pc,Evaluate	; Get indirect address, also parse ')'
+jsr  pc,EvalBracket1	; Get indirect address within brackets
+			; r4=>FN/PROC info block
+
+.cmdSubFound
+mov  (r4),r4		; r4=>start of subroutine
+mov  (sp)+,r1		; Get FN/PROC token back
+mov  r5,-(sp)		; Stack caller LPTR
+mov  sp,r0		; r0=>caller LPTR on stack
+mov  SV_STACK,-(sp)	; Stack caller's stack context
+clr  -(sp)		; Stack 'no more local data'
+mov  r1,-(sp)		; Stack FN/PROC token
+;
+;  r0=>caller LPTR on stack
+;  r1= FN/PROC token
+;  r4=>start of destination subroutine
+;  r5=>caller LPTR
+;  sp=> FN/PROC, &0000, caller LPTR, cmdret
+;
+;  DEFPROCfred<cr>
+;  DEFPROCfred:...
+;  DEFPROCfred(...
+;    r4=>-----^
+;
+;   PROCfred<cr>
+;   PROCfred:...
+;   PROCfred(...
+;  r5=>-----^
+;
+cmpb (r5),#ASC"("
+bne  cmdSubCall		; No calling parameters
+cmpb (r4),#ASC"("
+bne  errArguments	; Calling params, but no dest params
+
+.cmdSubLoop
+;  r0= address of caller LPTR on stack or &0000 for LOCAL
+;  r4=>start of destination subroutine or variables for LOCAL
+;  r5=>caller LPTR
+;  sp=> FN/PROC, &0000, caller SVSTACK, caller LPTR, cmdret
+;
+mov  r0,-(sp)		; sp=> addr(caller LPTR), FN/PROC, &0000, caller SVSTACK, callerLPTR, cmdret
+mov  r4,r5		; Point to dest params
+inc  r5			; Step past dest '(' or ','
+jsr  pc,VarFindCreate	; Look for destination variable
+;
+; r4=address of data block
+; r3=size/type of variable
+;    0001 - byte
+;    0004 - integer
+;    0005 - real
+;    8000 - dynamic string
+;    8100 - $string
+;    8200 - $$string
+;    4xxx - array of number - error generated later
+;    Cxxx - array of string - error generated later
+;
+mov  SV_VAREND,r0	; Save data at top of heap
+mov  r4,(r0)+		; Save data address
+mov  (sp)+,(r0)+	; Save pointer to caller LPTR
+mov  (sp)+,(r0)+	; Save FN/PROC
+mov  r3,-(sp)		; Stack data type/size
+jsr  pc,VarFindValFetch	; Fetch data value
+mov  (sp)+,r0		; r0=data type/size
+jsr  pc,StackValAndOp	; Stack it and type/size
+			; sp=> &0001, &0000, &lolo, &hihi,  &0000, caller SVSTACK, caller LPTR, cmdret - byte
+			; sp=> &0004, &0000, &lolo, &hihi,  &0000, caller SVSTACK, caller LPTR, cmdret - integer
+			; sp=> &0005, &00ee, &lolo, &hihi,  &0000, caller SVSTACK, caller LPTR, cmdret - real
+			; sp=> &8x00, &80nn, string, align, &0000, caller SVSTACK, caller LPTR, cmdret - string
+mov  (sp)+,r1		; r1=type/size
+mov  (sp),r2		; r2=type
+bic  #&00FF,r2		; Remove length/exponent from type
+bmi  cmdSubSwap1
+swab r1			; Move number size to top byte
+.cmdSubSwap1		; r1=&0100, &0400, &0500, &8000, &8100, &8200
+bis  (sp),r1		; r1=&0100, &0400, &05ee, &81nn, &81nn, &82nn
+mov  SV_VAREND,r0
+mov  (r0)+,(sp)		; sp=> addr, &lolo, &hihi,  &0000, caller LPTR, cmdret - integer
+;			; sp=> addr, &lolo, &hihi,  &0000, caller LPTR, cmdret - real
+;			; sp=> addr, string, align, &0000, caller LPTR, cmdret - string
+mov  r1,-(sp)		; sp=> &0100, addr, &lolo, &hihi,  &0000, caller LPTR, cmdret - byte
+;			; sp=> &0400, addr, &lolo, &hihi,  &0000, caller LPTR, cmdret - integer
+;			; sp=> &05ee, addr, &lolo, &hihi,  &0000, caller LPTR, cmdret - real
+;			; sp=> &8xnn, addr, string, align, &0000, caller LPTR, cmdret - string
+;			; sp=> &00xx - token
+;
+mov  (r0)+,r1		; r1=address of LPTR
+mov  (r0)+,-(sp)	; sp=>FN/PROC, type, addr, etc.
+mov  r5,-(sp)		; sp=>Dest LPTR, FN/PROC, type, addr, etc.
+clr  r4
+clr  r3			; Set value to null, r2 set eariler from stack
+mov  r1,-(sp)		; sp=>addr(caller LPTR), dest LPTR, FN/PROC, type, addr, etc.
+tst  r1			; *BUGFIX* RT11EM doesn't set EQ/NE from mov r1,-(sp)
+beq  cmdSubLocalise1	; addr(LPTR)=0 - LOCAL, set to null
+mov  (r1),r5		; Get caller LPTR
+;inc  r5		; Step past '(' or ','
+;jsr  pc,Evaluate	; Evaluate caller's passed parameter
+jsr  pc,Evaluate1	; Step past '(' or ',', then evaluate caller's passed parameter
+			; r4/r3/r2=data
+.cmdSubLocalise1
+mov  8(sp),r0		; Get data address
+mov  6(sp),r1		; Get data size/type
+bic  #&00FF,r1		; Remove len/exp from bottom of word
+bmi  cmdSubSwap2	; Jump if string
+swab r1			; Move number size to bottom byte
+.cmdSubSwap2		; r1=&0001, &0004, &0005, &8000, &8100, &8200
+jsr  pc,cmdAssignData	; Store data to destination variable
+mov  (sp)+,r0		; Get pointer to caller LPTR
+beq  cmdSubLocalise2	; addr(LPTR)=0 - LOCAL
+mov  r5,(r0)		; Update caller LPTR on stack
+			; sp=> dest LPTR, FN/PROC, type, addr, data, &0000, caller SVSTACK, caller LPTR, cmdret
+.cmdSubLocalise2
+mov  (sp)+,r4		; Get dest LPTR back
+			; sp=> FN/PROC, type, addr, data, &0000, caller LPTR, cmdret
+;
+;  r0=>caller LPTR on stack or &0000 for LOCAL
+;  r4= destination LPTR =>',' or ')'
+;  r5= caller LPTR =>',' or ')'
+;  sp=> FN/PROC, {data,} &0000, caller LPTR, cmdret
+;
+cmpb (r4),#ASC","
+bne  cmdSubParams	; No more params
+tst  r0
+beq  cmdSubLoop		; r0=&0000 - LOCAL
+cmpb (r5),#ASC","
+beq  cmdSubLoop		; Do another parameter
+.errArguments
+jsr  pc,Error
+equb 31,"Arguments",0
+align
+
+.cmdSubParams
+tst  r0
+beq  cmdSubCallGo	; r0=&0000 - LOCAL, continue execution
+inc  (r0)		; Step caller's LPTR on stack past ')'
+movb (r5),r0		; Get caller char, ')' stepped past on stack
+jsr  pc,CheckClose1	; Caller must end with ')'
+movb (r4)+,r0		; Get dest char and step past
+jsr  pc,CheckClose1	; Dest must end with ')'
+;
+.cmdSubCall
+;  r4=>start of destination subroutine
+;  r5=>caller LPTR
+;  sp=> FN/PROC, {data,} &0000, caller SVSTACK, caller LPTR, cmdret
+cmpb (r4),#ASC"("
+beq  errArguments	; Calling params, but no dest params
+.cmdSubCallGo
+mov  sp,SV_STACK	; Set current stack context
+mov  r4,r5		; Set line pointer to start of subroutine
+jmp  Execute		; And start executing
+
+;.errBadCall
+;jsr  pc,Error
+;equb 30,"Bad call",0
+;align
+
+; Pop stacked localised data and return from subroutine calls
+; ===========================================================
+; Stack holds
+; cmdret, &0000 - empty
+; cmdret, &00nn - token
+; cmdret, &nnxx - data
+;
+; Bottom of stack, looping and subroutine structures
+; cmdret, tknFOR, step[6], limit[5], vartype[1], ^variable, saved r5
+; cmdret, tknREPEAT, saved r5
+; cmdret, tkkGOSUB, saved r5
+; cmdret, tknERROR, saved SV_STACK, saved SV_ONERR (STSTACK already saved, can it be omitted here?)
+; cmdret, tknDATA, saved SV_DATA
+;
+; Next up stack, subroutine structures
+; cmdret, tknPROC, {type, addr, data...}, &0000, caller SVSTACK, saved r5
+; cmdret, tknFN, {type, addr, data...}, &0000, caller SVSTACK, saved r5
+;
+; {type, addr, data} includes:
+;   tknDIM, aligned size, DIM LOCAL data - todo
+;   
+; {type, addr, data} stacked local data:
+;  &0000                           - end of stacked data
+;  &00nn                           - token
+; Token will always be >&7F, so could use &00nn for byte/int size
+; but we use &8nnn for string
+;  &0100, address, b0-b15, b16-b31 - byte
+;  &0400, address, b0-b15, b16-b31 - integer
+;  &05ee, address, mantis, mantis  - real
+;  &80nn, address, string, align   - string
+;  &81nn, address, string, align   - $address
+;  &82nn, address, string, align   - $$address
+; (&2xxx, address,                  - RETURN variable - todo)
+;
+; =<value>
+; ========
+; On entry, sp=> cmdret, {stacked loops,} tknFN, {locals... } &0000, caller SVSTACK, saved r5, fnret, ...
+; If empty, sp=> cmdret, &0000
+.cmdEquals
+jsr  pc,Evaluate	; r4/r3/r2=return value
+bpl  cmdEqualsNum	; Not string
+;
+; Copy string to string buffer to prevent eg =A$ being overwritten by deLOCALising A$
+;
+mov  r3,-(sp)		; Save length
+;mov  r3,r2		; r2=length
+;mov  r4,r3		; r3=string start
+;jsr  pc,CopyString	; Copy string to string buffer
+jsr  pc,EnsureString	; Copy string to string buffer
+mov  (sp)+,r3		; Get length back
+mov  #&8000,r2		; r2=&8000 - string
+.cmdEqualsNum
+mov  r4,-(sp)
+mov  r3,-(sp)
+mov  r2,-(sp)		; Save return value
+mov  #tknFN,r0		; Within FN call
+br   cmdFNENDPROC
+
+
+; ENDPROC
+; =======
+; On entry, sp=> cmdret, {stacked loops/data/error,} tknPROC, {locals... } &0000, saved SVSTACK, saved LPTR, cmdret, ...
+; If empty, sp=> cmdret, &0000
+;
+.cmdENDPROC
+sub  #6,sp		; Make space on stack to balance later restore
+mov  #tknPROC,r0
+.cmdFNENDPROC
+mov  sp,r1		; r1=>rettype, retval, retval, cmdret, tknXX, ...
+add  #8,r1		; r1=>tknXXX, any stacked data
+mov  r0,-(sp)		; (sp)=subroutine token
+.cmdPopLoop
+mov  (r1)+,r0		; Get token from bottom of stack
+cmpb r0,(sp)
+beq  cmdPopCall		; Matching subroutine token
+cmpb r0,#tknFOR
+beq  cmdPopFor
+cmpb r0,#tknREPEAT
+beq  cmdPopRepeat
+;cmpb r0,#tknGOSUB	; Error to try to ENDPROC out of a GOSUB
+;beq  cmdPopGosub
+cmpb (sp)+,#tknFN
+beq  errNoFN
+jsr  pc,Error
+equb 13,"Not in a ",tknPROC,0
+align
+.errNoFN
+jsr  pc,Error
+equb 7,"Not in a function",0
+align
+.cmdPopFor
+add  #14,r1		; Drop step, limit, type, variable
+.cmdPopRepeat
+.cmdPopGosub
+tst  (r1)+		; Drop savedR5
+br   cmdPopLoop		; Loop to pop any more data
+
+; Localised program loops popped off stack
+; r1=>{size, addr, data}, &0000, savedSVSTACK, savedLPTR, cmdret
+;   
+; {type, addr, data} stacked local data:
+;  &0000                           - no more local data
+;  &0085, address, address         - LOCAL ERROR
+;  &00DC, address                  - LOCAL DATA
+;  &00xx, size, space, align       - DIM LOCAL
+;  &0100, address, b0-b15, b16-b31 - byte
+;  &0400, address, b0-b15, b16-b31 - integer
+;  &05ee, address, mantis, mantis  - real
+;  &80nn, address, string, align   - string
+;  &81nn, address, string, align   - $address
+;  &82nn, address, string, align   - $$address
+;
+; Localised ERROR and DATA pointers popped off stack
+; ideally like to be able to access stack items with ?addr !addr |addr
+; would require b0-b7 b8-b15 b16-b23 b24-b31 exp/type
+; but for strings and bytes, bottom byte on stack needs to be data type
+;
+.cmdPopData
+;mov (r1)+,SV_DATA	; Restore data handler
+;br  cmdPopCall		; Continue to pop any more data
+.cmdPopError
+;mov (r1)+,SV_STACK	; Restore stack context (already saved?)
+;mov (r1)+,SV_ONERR	; Restore error handler
+mov  (r1)+,(r3)		; Restore ONERR or DATA
+			; Continue to pop any more data
+
+.cmdPopCall
+mov  (r1)+,r0		; r0=&0000 or variable size &0100,&0400,&05ee or token
+beq  cmdPopDone		; No more localised items
+bmi  cmdPopString	; &8xnn -> string
+adr  SV_ONERR,r3	; r3=>SV_ERROR
+cmp  r0,#tknERROR	; Pop local ERROR state
+beq  cmdPopError
+inc  r3			; r3=>SV_DATA
+cmp  r0,#tknDATA	; Pop local DATA pointer
+beq  cmdPopData
+mov  (r1)+,r3		; r3=address of data
+mov  (r1)+,r4		; r4=b0-b15
+mov  r1,-(sp)		; save pointer into stack
+mov  (r1),-(sp)		; Copy b16-b31 to stack
+mov  r3,r1		; r1=address of data
+mov  (sp)+,r3		; r3=b16-b31
+mov  r0,r2		; r2=exponent
+swab r0			; Move data size to bottom byte
+bic  #&FF00,r0		; Remove exponent from data size
+bic  #&FF00,r2		; Remove size from exponent
+;
+; r0=data size 1, 4 or 5 - byte stored on stack as a word
+; r1=>data block
+; r2/r3/r4=value
+jsr  pc,cmdAssignNumber	; Restore numeric variable
+;
+mov  (sp)+,r1		; Get pointer to stacked data back
+tst  (r1)+		; Step past b16-b31 on stack
+br   cmdPopCall		; Loop to unstack next item
+
+;bit  #&0100,r2		; Is it a byte?
+;beq  cmdPopNumber	; No, pop six bytes
+;tst  -(r1)		; Balance r1 for later
+;mov  r2,r4
+;bic  #&FF00,r4		; r4=byte value
+;mov  r1,-(sp)		; save pointer
+;mov  r3,r1		; r1=address of data
+;clr  r3
+;clr  r2		; r2/r3/r4=byte value
+;br   cmdPopNumAssign	; Jump to assign it and loop for next
+
+;  r0=&80nn, sp=>address, string, align - string
+;  r0=&81nn, sp=>address, string, align - $address
+;  r0=&82nn, sp=>address, string, align - $$address
+.cmdPopString
+mov  r0,r2		; r2=&8x00+string length
+mov  (r1)+,r0		; r0=destination address
+;
+; r0=destination address (string info block or absolute string base)
+; r1=>source string
+; r2=&8x00+string length
+; r3=temp
+;
+jsr  pc,cmdAssignString2
+inc  r1
+bic  #1,r1		; Ensure r1 evenly aligned
+br   cmdPopCall		; Loop for any more
+
+; All localised items popped from stack
+; r1=>savedSVSTACK, savedLPTR, cmdret
+; sp=>token, r2, r3, r4
+.cmdPopDone
+;#ifdef DEBUG
+; mov SV_STACK,r0
+; jsr pc,Debug_DumpRegsHex
+; mov sp,r5
+; jsr pc,Debug_DumpMem
+; mov r1,r5
+; jsr pc,Debug_DumpMem
+;#endif
+tst  (sp)+		; Drop token
+mov  (sp)+,r2		; Fetch any return value
+mov  (sp)+,r3
+mov  (sp)+,r4
+mov  r1,sp		; Point to new stack top
+mov  (sp)+,SV_STACK	; Restore stack context
+mov  (sp)+,r5		; Get stacked program pointer
+;mov  (sp)+,r1		; Get return address
+tst  r2 		; Set return value flags
+;jmp  (r1)		; ...and return
+rts  pc			; ...and return
+
+
+; IF <numeric> [THEN ...] [ELSE ...]
+; ==================================
+.cmdIF
+jsr  pc,EvalInteger
+bis  r3,r4		; Is it zero?
+bne  cmdIFexit		; Continue
+.cmdIFelse
+movb (r5)+,r0
+cmpb r0,#tknELSE
+beq  cmdIFexit		; ELSE found, continue from here
+cmpb r0,#13
+beq  cmdIFexit1		; No ELSE found, step back to <cr> and continue on next line
+cmpb r0,#34
+bne  cmdIFelse		; Not a quote, keep looking for ELSE
+.cmdIFquote
+movb (r5)+,r0		; Look for closing quote
+cmpb r0,#34
+beq  cmdIFelse		; Loop back to look for ELSE
+cmpb r0,#13
+bne  cmdIFquote		; Not <cr>, keep looping until closing quote found
+; End of line found, step back to <cr> and continue on next line
+; This can be moved to a convenient nearby dec r5/rts
+.cmdIFexit1
+dec  r5
+.cmdIFexit
+rts  pc
+
+
+; ON, ON ERROR, ON x GOTO, ON x GOSUB, ON x PROC
+; ==============================================
+.cmdON
+jsr  pc,CheckEndStatement
+bne  cmdON1
+jmp  cmdONvdu		; ON - turn on cursor
+.cmdON1
+cmpb r0,#tknERROR	; Is it ON ERROR?
+bne  cmdONswitch	; No, jump to ON x [GOTO|PROC]
+jsr  pc,FetchNextChar
+cmpb r0,#tknOFF		; Is it ON ERROR OFF?
+beq  cmdONErrorOff	; Yes, jump to turn ON ERROR OFF
+mov  r5,SV_ONERR	; Point ON ERROR to here
+jmp  SkipLine		; Skip rest of line and continue
+.cmdONErrorOff
+clr  SV_ONERR		; ON ERROR OFF
+inc  r5			; Step past OFF token
+rts  pc
+
+; ON <num> [GOTO|GOSUB|PROC]
+; --------------------------
+.cmdONswitch
+jsr  pc,EvalInteger	; Get <num>
+movb (r5)+,r0		; Get following token
+cmpb r0,#tknGOTO
+beq  cmdONswitch1	; ON <num> GOTO...
+cmpb r0,#tknGOSUB
+beq  cmdONswitch1	; ON <num> GOSUB...
+;cmpb r0,#tknPROC
+;beq  cmdONswitch1	; ON <num> PROC...
+jsr  pc,Error
+equb 39,tknON," syntax",0
+align
+;
+.cmdONswitch1
+; r5=>switch token, r0=switch token
+; r4/r3=index into switch
+tst  r3
+bne  cmdONelse		; ON >65535 - out of range, look for an ELSE
+dec  r4			; 0->65535, 1-65535->0-65534
+bit  #&FF80,r4
+bne  cmdONelse		; ON >127 or ON zero - out of range, look for an ELSE
+			; Unrealistic to expect num>127 as max line length is 253 chars
+tst  r4
+beq  cmdONfound		; First destination, use it
+.cmdONsearch		; Look for a comma
+movb (r5)+,r1		; Get character from line, r0=GOTO/GOSUB
+cmpb r1,#13
+beq  errONrange		; <cr> - end of line, error
+cmpb r1,#3A
+beq  errONrange		; Colon - end of statement, error
+cmpb r1,#tknELSE
+beq  cmdONfound		; ELSE clause, end of clauses, fall through
+cmpb r1,#ASC","
+bne  cmdONsearch	; Otherwise, keep looking for a comma
+dec  r4			; Decrease counter
+bne  cmdONsearch	; Loop until counter decremented to zero
+.cmdONfound
+cmpb r0,#tknGOTO
+bne  cmdONgosub		; Not GOTO, jump to do ON GOSUB
+inc  r5			; Balance next dec r5, fall through into GOTO
+
+
+; GOTO <linenum>
+; ==============
+.cmdGOTO1
+dec r5			; Step back to point to LINNUM token
+.cmdGOTO
+jsr pc,GetLineNumber	; Evaluate and look for line
+mov r1,r5		; Point to GOTO destination
+.cmdGOTOok
+rts pc			; Continue executing
+
+; ON <num> GOSUB
+; --------------
+.cmdONgosub
+jsr  pc,GetLineNumber	; Evaluate line number and find destination
+.cmdONswitch3
+movb (r5)+,r0		; Step past any more clauses to find RETURN point
+cmpb r0,#&3A
+beq  cmdONswitch4	; End of statement, RETURN to here
+cmpb r0,#13
+bne  cmdONswitch3	; End of line, RETURN to here
+dec r5			; Step back to point to <cr>
+.cmdONswitch4
+br  cmdGOSUB1		; Continue into GOSUB
+
+; ON <num> out of range, look for an ELSE clause
+; ----------------------------------------------
+.cmdONelse
+movb (r5)+,r1
+cmpb r1,#tknELSE	; Look for ELSE clause
+beq  cmdONfound		; Found ELSE, use it for GOTO/GOSUB destination
+cmpb r1,#13		; Loop until end of line
+bne  cmdONelse		; If end of line found, no ELSE clause found
+.errONrange
+jsr  pc,Error
+equb 40,tknON," range",0
+align
+
+; GOSUB <linenum>
+; ===============
+; On entry, sp=>cmdret
+; On exit,  sp=>tknGOSUB, saved r5
+; We don't need to check for free memory, as Evaluate checks
+;
+.cmdGOSUB
+jsr pc,GetLineNumber	; Evaluate and look for line
+.cmdGOSUB1
+mov (sp),r0		; Get cmdret
+mov r5,(sp)		; Save current program pointer
+mov #tknGOSUB,-(sp)	; Stack GOSUB token
+mov r1,r5		; Point to GOSUB destination
+jmp (r0)		; Return to execution code
+
+.GetLineNumber
+clr r4
+.GetLineNumOffset
+mov r4,-(sp)
+jsr pc,EvalInteger	; r4/r3=destination line number
+add (sp)+,r4
+adc r3
+bne errNoSuchLine
+jsr pc,LineFind		; r1=><cr> before destination line if found
+beq cmdGOTOok		; EQ - line found
+.errNoSuchLine
+jsr  pc,Error
+equb 41,"No such line",0
+align
+
+; RETURN
+; ======
+; On entry, sp=> cmdret, tknGOSUB, savedR5
+;
+.cmdRETURN
+cmpb 2(sp),#tknGOSUB
+beq  cmdRETURNok
+jsr  pc,Error
+equb 38,"No ",tknGOSUB,0
+align
+.cmdRETURNok
+mov (sp)+,r1		; Get cmdret
+tst (sp)+		; Drop tknGOSUB
+mov (sp)+,r5		; Pop line pointer
+jmp (r1)		; Return to execution loop
+
+
+; PRINT - Print to output stream or to file
+; =========================================
+.cmdPRINT
+jsr pc,SkipSpaceThis
+cmp r0,#ASC"#"		; Is it PRINT # ?
+bne cmdPrintLoop	; Jump for normal PRINT
+
+; PRINT#chn,{items...} - Output to open file
+; ------------------------------------------
+.cmdPRINTchn
+;jsr  pc,EvalInteger1	; Step past '#', get channel
+jsr  pc,EvalHashInt1	; Step past '#', get channel
+mov  r4,-(sp)		; Save channel
+.cmdPRINTchnLp
+jsr  pc,SkipSpaceThis	; Get current character
+cmpb r0,#ASC","		; r0=next character
+bne  cmdPRINTchnEnd
+;inc  r5		; Step past comma
+;jsr  pc,Evaluate	; (all these 'inc r5's could be moved to before Evaluate)
+jsr  pc,Evaluate1	; Step past comma and evaluate expression
+bmi  cmdPRINTchnStr	; MI - string
+beq  cmdPRINTchnInt	; EQ - integer
+mov  #&FF,r0		; &FF to indicate Real
+br   cmdPRINTchnNum
+;
+.cmdPRINTchnInt
+mov  #&40,r0		; &40 to indicate Integer
+.cmdPRINTchnNum
+mov  (sp),r1		; Get channel
+jsr  pc,IO_BPUT		; Output &40/Int or &FF/Real
+mov  r2,-(sp)		; Save exponent
+mov  #2,r2		; Two passes for two*2 bytes
+mov  r3,r0		; First two bytes from r3
+.cmdPRINTchnIntLp
+swab r0
+jsr  pc,IO_BPUT		; Output b24-b31, then b8-b15
+swab r0
+jsr  pc,IO_BPUT		; Output b16-b23, then b0-b7
+mov  r4,r0		; Second two bytes from r4
+dec  r2
+bne  cmdPRINTchnIntLp	; Loop to do two sets of two bytes
+mov  (sp)+,r0		; Get exponent back
+beq  cmdPRINTchnLp	; &00, integer, loop back for next item
+inc  r0			; Acorn files use bias-&7F, so need to add 1
+jsr  pc,IO_BPUT		; Output exponent
+br   cmdPRINTchnLp	; Jump back for next item
+;
+.cmdPRINTchnStr
+mov  (sp),r1		; Get channel
+clr  r0
+jsr  pc,IO_BPUT		; Output &00 to indicate string
+add  r3,r4		; Point r4 to end of string
+mov  r3,r0
+.cmdPRINTchnStrLp
+jsr  pc,IO_BPUT		; Output string length then string characters
+tst  r3
+beq  cmdPRINTchnLp
+dec  r3			; Decrement string length
+movb -(r4),r0		; Get character
+br   cmdPRINTchnStrLp	; Loop back to output it
+;
+;.cmdPRINTchnEnd
+;tst (sp)+		; Drop channel
+;rts pc
+
+; PRINT main code
+; ---------------
+.cmdPrintComma
+movb SV_VARS,r0		; Get field width
+beq  cmdPrintLoop	; Zero, no padding needed, return to main loop
+bic  #&FF00,r0		; Remove any sign-extension
+movb SV_COUNT,r1	; Get field width
+bic  #&FF00,r1		; Remove any sign-extension
+.cmdPrintCommaLp
+beq  cmdPrintLoop	; Zero, start of new line or field, no padding needed, return to main loop
+sub  r0,r1		; r1=COUNT-width
+bcc  cmdPrintCommaLp	; Loop until reduced below zero
+mov  #32,r0
+.cmdPrintCommaSpc
+jsr  pc,PrintR0		; Print padding spaces
+inc  r1
+bne  cmdPrintCommaSpc	; Loop until reached next field
+;
+.cmdPrintLoop
+movb SV_VARS,r1		; Get field width from @%
+.cmdPrintNextReset
+bic  #&FF00,r1		; b7=0 - decimal
+.cmdPrintNext
+jsr  pc,CheckEndStatement
+bne  cmdPrintItem	; No, jump to process items
+.cmdPrintNewline
+clrb SV_COUNT		; Clear COUNT
+jsr  pc,IO_NEWL		; Finish with newline
+clc			; Signal print item done
+rts  pc
+;
+.cmdPrintSemi
+clr  r1			; Set field width=0, flag=dec
+;jsr  pc,SkipSpaceThis	; Get next char
+;jsr  pc,CheckEndToken	; End of statement? - could be CheckEndStatement
+jsr  pc,CheckEndStatement
+beq  cmdPrintDone	; Exit without printing newline
+;
+.cmdPrintItem
+jsr  pc,fnConversion	; Check for hex/oct/bin prefix
+bcs  cmdPrintNext	; Prefix found, check next item
+inc  r5			; Step past current character
+cmp  r0,#ASC","		; Print comma?
+beq  cmdPrintComma	; Jump to pad to next field
+cmp  r0,#&3B		; Semicolon?
+beq  cmdPrintSemi	; Jump to check for end of print statement
+;
+jsr  pc,cmdPrintFormat	; Check for ' TAB SPC print formatting
+bcc  cmdPrintNextReset	; Formatting item printed, reset to Decimal, check next item
+mov  r1,-(sp)		; Save print flag (as Evaluate trashes all registers)
+jsr  pc,Evaluate	; Evalute current item
+mov  (sp)+,r1		; Get print flag back
+jsr  pc,cmdPrintResult
+br   cmdPrintNext
+
+; Moved here to share code
+.cmdPRINTchnEnd
+.cmdINPUTchnEnd
+tst  (sp)+		; Drop channel
+rts  pc
+
+.PrintLineNum
+clr  r1			; No space padding
+;
+.PrintLineNumber
+; On entry, r4=line number
+;           r1=max number of padding spaces
+;
+clr  r3			; 16-bit number
+clr  r2			; type=integer
+.cmdPrintResult
+; On entry, r2/r3/r4=value
+;           r1=hex flag+field width
+;           r0=???
+; On exit,  r0/r2/r3/r4 corrupted
+;
+tst  r2			; Check result type
+bmi  cmdPrintString	; String, print it
+mov  r1,-(sp)		; Save field width/hex flag
+jsr  pc,NumberToString	; Convert numeric to string
+			; r4=>string, r3=length
+mov  (sp),r1		; r1=field width
+bic  #&FF00,r1		; Drop hex flag from top byte
+sub  r3,r1		; r1=width-length
+bcs  cmdPrintStringPop	; Item wider than width, no padding
+;beq  cmdPrintStringPop	; Item same as width, no padding
+jsr  pc,PrintR1Spaces	; Print spaces to pad to number
+.cmdPrintStringPop
+mov  (sp)+,r1		; Get field width/hex flag back
+.cmdPrintString
+tst  r3			; Check string length
+beq  cmdPrintResultDone	; Null string, nothing to print
+.cmdPrintStrLp
+movb (r4)+,r0		; Get a character
+jsr  pc,PrintR0		; Print it
+dec  r3
+bne  cmdPrintStrLp	; Loop for all characters
+.cmdPrintResultDone
+rts  pc
+
+; PRINT formatting item - ', TAB, SPC
+; -----------------------------------
+.cmdPrintFormat
+cmpb r0,#ASC"'"		; It it single quote?
+beq  cmdPrintNewline	; Jump to print newline
+cmpb r0,#tknTAB		; Is it TAB?
+beq  cmdPrintTAB	; Jump to do TAB(x) or TAB(x,y)
+cmpb r0,#tknSPC		; Is it SPC?
+beq  cmdPrintSPC	; Jump to do SPC(x)
+dec  r5			; Point back to current item
+sec			; Signal 'not print item'
+rts  pc
+
+; PRINT TAB()
+; -----------
+.cmdPrintTAB
+jsr pc,EvalInteger	; Get first parameter
+jsr pc,SkipSpaceThis	; Check next character
+; Won't EvalInt return after skipping spaces anyway?
+cmp r0,#ASC","		; Is there a comma?
+beq cmdPrintTABXY	; Jump to do TAB(x,y)
+jsr pc,CheckClose1	; Check for closing bracket
+inc r5
+movb SV_COUNT,r0	; Get COUNT
+mov r4,r1		; r1=required column
+sub r0,r1		; r1=r1-r0 - r1=tab-COUNT
+;beq cmdPrintDone	; No spaces needed (not needed as BEQ in PrintR1Spaces)
+bcc PrintR1Spaces	; Jump to output required spaces
+jsr pc,cmdPrintNewline	; Output newline, zero count, signal done
+mov r4,r1		; R1=number of spaces
+br PrintR1Spaces	; Jump to output required spaces
+
+; PRINT TAB(x,y)
+; --------------
+.cmdPrintTABXY
+inc r5			; Step past comma
+mov r4,-(sp)		; Save current value
+jsr pc,EvalInteger	; Get next integer
+jsr pc,CheckClose	; Step past ')'
+mov #31,r0
+jsr pc,IO_WRCH		; Send TAB
+mov (sp)+,r0
+jsr pc,IO_WRCH		; Send X
+mov r4,r0
+jsr pc,IO_WRCH		; Send Y
+.cmdPrintDone
+clc			; Signal print formatting item
+.cmdInputDone
+rts pc
+
+; PRINT SPC(n)
+; ------------
+.cmdPrintSPC
+jsr pc,EvalInteger	; Get next integer
+mov r4,r1		; Move to R1
+.PrintR1Spaces
+bic #&FF00,r1		; Ensure 8-bit value
+beq cmdPrintDone	; Zero - clear carry and return
+mov #32,r0
+.PrintR1SpcLp
+jsr pc,PrintR0		; Print space
+dec r1
+bne PrintR1SpcLp	; Loop until required spaces printed
+br cmdPrintDone		; Clear carry and return
+
+
+; INPUT - Input from input stream or file
+; =======================================
+.cmdINPUT
+jsr pc,SkipSpaceThis
+cmp r0,#ASC"#"		; Is it INPUT # ?
+bne cmdInputStart	; Jump for normal INPUT
+
+; INPUT#chn,{items...} - Input from open file
+; -------------------------------------------
+.cmdINPUTchn
+jsr  pc,EvalHashInt1	; Step past '#', get channel
+mov  r4,-(sp)		; Save channel
+.cmdINPUTchnLp
+jsr  pc,SkipSpaceThis	; Get current character
+cmpb r0,#ASC","		; r0=next character
+bne  cmdINPUTchnEnd
+jsr  pc,cmdINPUTchnRead	; Read from file and assign
+br   cmdINPUTchnLp
+;.cmdINPUTchnEnd
+;tst  (sp)+		; Drop channel
+;rts  pc
+;
+.cmdINPUTchnRead
+inc  r5			; Step past comma
+jsr  pc,VarFindCreate	; Parse and create variable
+mov  2(sp),r1		; Get channel
+mov  r4,-(sp)		; Save variable address
+mov  r3,-(sp)		; Save variable type/size, set flags
+bmi  cmdINPUTchnStr	; MI - string
+jsr  pc,IO_BGET		; &FF real, <>&FF int
+mov  r0,-(sp)		; Save int/real flag
+mov  #2,r2		; Make two passes to get two words
+.cmdINPUTchnIntLp
+mov  r4,r3
+jsr  pc,IO_BGET		; b24-b31 then b8-b15
+movb r0,r4
+swab r4
+jsr  pc,IO_BGET		; b16-b23 then b0-b7
+bis  r0,r4
+dec  r2
+bne  cmdINPUTchnIntLp	; Loop to get two 16-bit words
+bit  #&80,(sp)+		; Get int/real flag
+beq  cmdINPUTchnAssign	; b7=0, int; r2 already 0 for int
+jsr  pc,IO_BGET		; Get exponent
+dec  r0			; Acorn files use bias-&7F, so need to sub 1
+mov  r0,r2
+bic  #&FF00,r2
+.cmdINPUTchnAssign
+jmp  cmdAssign4
+;
+.cmdINPUTchnStr
+jsr  pc,IO_BGET		; Get string marker
+jsr  pc,IO_BGET		; Get string length
+adr  SV_STRING,r4	; r4=string start
+mov  r0,r3		; r3=string length
+beq  cmdINPUTchnStrAssign ; Null string
+mov  r0,r2		; r2=string count
+add  r2,r4		; r4=>end of string
+inc  r4			; Balance pre-decrement
+.cmdINPUTchnStrLp
+jsr  pc,IO_BGET		; Get character
+movb r0,-(r4)		; Store it
+dec  r2
+bne  cmdINPUTchnStrLp	; Loop until no more chars
+.cmdINPUTchnStrAssign
+mov  #&8000,r2		; Type=string
+jmp  cmdAssign4
+
+; INPUT main code - always does INPUT LINE
+; ----------------------------------------
+.cmdInputStart
+;clr  -(sp)		; (sp).31=0 - not LINE
+cmpb r0,#tknLINE	; Is it INPUT LINE ?
+bne  cmdInputLoop
+;dec  (sp)		; (sp).31=1 - LINE
+.cmdInputNext
+inc  r5			; Step past LINE token
+.cmdInputLoop
+jsr  pc,SkipSpaceNext
+jsr  pc,cmdPrintFormat	; Check for ' TAB SPC print formatting
+bcc  cmdInputLoop	; Keep printing formatting items
+jsr  pc,CheckEndStatement
+beq  cmdInputDone	; End of statement - finished
+cmpb r0,#ASC","
+beq  cmdInputNext	; Comma - step to next item
+cmpb r0,#&3B
+beq  cmdInputNext	; Semicolon - step to next item
+cmpb r0,#34
+bne  cmdInputVariable	; Not quote, must be a variable name
+jsr  pc,Evaluate	; Evalute string
+jsr  pc,cmdPrintString	; Print it
+br   cmdInputLoop	; Loop for next item
+.cmdInputVariable
+jsr  pc,cmdInputData	; Input data from user and assign it
+br   cmdInputLoop	; Loop for next item
+;.cmdInputDone
+;;tst  (sp)+		; Drop LINE flag
+;rts  pc
+
+; Must now be a variable, so get input from user
+; ----------------------------------------------
+.cmdInputData
+adr  SV_STRING,r1	; Point to string buffer
+jsr  pc,IO_ReadLine	; Read a line of input and zero COUNT
+jsr  pc,VarFindCreate	; Parse and create variable
+mov  r4,-(sp)		; Save variable address
+adr  SV_STRING,r4	; Point to string buffer
+mov  r3,-(sp)		; Save variable type/size, set flags
+bmi  cmdInputString
+jsr  pc,fnVAL1		; Convert to decimal
+jmp  cmdAssign4
+;
+.cmdInputString
+mov  #&8100,r3		; Type is <cr>-string
+jsr  pc,VarFindString	; Count length of string
+jmp  cmdAssign4
+

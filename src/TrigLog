@@ -1,0 +1,46 @@
+; > TrigLog
+; Trigonometric and logarithmic functions
+
+; 16-Aug-2018: DEG and RAD done, PI moved here.
+
+
+; Trigonometrical functions
+; =========================
+
+.fnPI
+mov #&DAA2,r4		; mantissa=&xxxxDAA2
+mov #&490F,r3		; mantissa=&490Fxxxx
+mov #&0081,r2		; real exponent=&81
+rts pc
+
+.fnDEG
+jsr pc,Eval180PI	; Stack 180/PI and evaluate float
+jsr pc,fnMultiplyFloat	; DEG=(180/PI)*RAD
+rts pc			; Note, stack adjusted so can't JMP
+
+.fnRAD
+jsr pc,Eval180PI	; Stack 180/PI and evaluate float
+jsr pc,fnDivideSwap	; RAD=(180/PI)/DEG
+rts pc			; Note, stack adjusted so can't JMP
+
+.Eval180PI
+mov (sp),r1		; Get return address
+mov #&652E,(sp)		; Push 180/PI
+mov #&E0D3,-(sp)
+mov #&0085,-(sp)
+mov r1,-(sp)		; Push return address back
+jmp EvalFloatVal	; Evaluate parameter as a float
+
+.fnACS
+.fnASN
+.fnATN
+.fnCOS
+.fnSIN
+.fnTAN
+
+; Logarithmic functions
+; =====================
+.fnEXP
+.fnLN
+.fnLOG
+jmp  EvalFloatVal	; Get float, return it

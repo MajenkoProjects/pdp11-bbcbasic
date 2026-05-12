@@ -1,0 +1,8 @@
+| Makes PDP11 BBC BASIC with RT11 I/O, with listing output
+|
+*Dir <Obey$Dir>
+*X Access ^.basicRT11 wr/r
+*/net::Software.PDP11.Assembler.AsmPDP MakeRT11 ^.basic/sav basic/lst
+*Access ^.basic/sav r/r
+*SetType ^.basic/sav 1C5
+*IfRetVal Error Assembly error

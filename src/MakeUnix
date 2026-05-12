@@ -1,0 +1,18 @@
+; > MakeUnix
+; PDP11 BBC BASIC on Unix
+; (C)J.G.Harston 1988-2023
+
+OSNAME$:   EQU "Unix"
+#define NODIV			; Don't use DIV instruction
+#ifdef BSD211
+  OSNAME$: EQU "BSD2.11"
+  #define  APISTK		; API calls use stack (not inline)
+  #define  NOEMT		; Remove all EMT calls
+#endif
+#include "Version"		; Version settings
+#include "MakeMain"		; Main BASIC code
+#include "CommonIO"		; Common non-Tube I/O interface code
+#include "AnsiKBD"		; ANSI keyboard parsing
+#include "UnixIO"		; Interface to Unix host I/O system
+#include "SysVars"		; System variables and data buffers
+

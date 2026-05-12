@@ -1,0 +1,322 @@
+; > Startup
+; BBC BASIC for the pdp11
+; (C)J.G.Harston 1988, 1989, 2005-2018
+; Program header and BASIC startup, etc.
+; 18-Mar-2024 Restructured ImmLineNum and InsLine to use new return from Tokeniser.
+
+
+#ifdef STARTADDR
+ORG STARTADDR			; If start address specified, use it
+#else
+ORG 0				; Otherwise, position independent code
+
+EQUW &0107			; Magic number &o000407, also branch to Startup
+EQUW CodeEnd-Startup		; size of text
+EQUW DataEnd-CodeEnd		; size of initialised data
+EQUW BasicEnd-DataEnd		; size of uninitialised data
+EQUW &0000			; size of symbol data
+EQUW Startup-Startup		; entry point
+EQUW &0000			; not used
+EQUW &0001			; no relocation info
+;
+ORG 0				; Position independent code
+#endif
+
+#ifdef UNIXBASE
+ORG UNIXBASE			; If start address specified, use it
+#endif
+
+._TEXT%
+._ENTRY%
+.Startup
+; On entry, SP=>initial stack, R7=Startup
+;           Unix: R0-R5=0
+;                 R6=>pointers to command line strings, terminated with 0,
+;                     then command line strings
+;                 R5= Environment flag
+;                 Normally, header will not have been loaded and memory will
+;                 be mapped so Startup=&0000
+;           RT11: R2=stack top?
+;                 R5=top of memory?
+;
+; When run in BBC environment,
+;              R5=&0BBC
+;              R0=1 if entered as a language
+;              If R0=1, CC=RESET, CS=OSCLI
+;
+; Unix Loader clears system variables. Not strictly needed as all system
+;  variables are initialised at some point (eg CLEAR, etc.).
+; CALL 0 will not re-enter BASIC, as it will look for another filename on
+; the stack.
+;
+jsr  pc,IO_Init			; Initialise I/O, find memory limits, command line, etc.
+.Restart
+mov  r0,SV_PAGE			; Put initial PAGE at bottom of memory
+mov  r1,SV_HIMEM		; Put initial HIMEM at top of memory
+mov  r1,sp			; Put stack at top of memory
+mov  #&090A,SV_VARS		; @%=&90A
+adr  StartupCopyright-1,r0	; Get location of (C) message
+mov  r0,SV_FAULT		; Point REPORT to it
+;jsr  pc,IO_ReadTime		; Read raw system time to R0:R1
+;mov  r0,SV_RAND+0		; Set RND seed
+;mov  r1,SV_RAND+2
+mov  #1,r0			; R0=1 - Read TIME
+adr  SV_RAND,r1
+jsr  pc,IO_WORD			; Set RND seed from system time
+clr  SV_WIDTH			; Clear WIDTH and COUNT
+clr  SV_OPTIONS			; Clear OPTIONS and ERR
+clr  SV_TRACE			; Turn TRACE off
+tstb SV_SYS			; Test QUIT flag
+bmi  jmpRunProgram		; QUIT set, run embedded program
+adr  SV_STRING,r4
+cmpb (r4),#13			; Get first character from string buffer
+beq  StartupNull		; Command line="", nothing to chain
+bisb #&80,SV_SYS		; Set QUIT flag
+jmp  ChainStartup		; Jump to do CHAIN "filename"
+; *NB* need to ensure R5=><cr> for endofstatement check to work when added
+.jmpRunProgram
+jsr  pc,FindTOP			; Set program pointers, R5=>end of program
+jmp  RunProgram			; Run program
+
+.StartupNull
+jsr pc,PrintInline
+.StartupMessage
+EQUS "PDP11 BBC BASIC IV Version "
+EQUB ((VERSION >> 8) AND 15)+48
+EQUS "."
+EQUB ((VERSION >> 4) AND 15)+48
+EQUB (VERSION AND 15)+48
+#ifdef BUILD
+ #if BUILD
+  EQUB 96+BUILD
+ #endif
+#endif
+#ifdef OSNAME$
+ EQUS " (",OSNAME$,")"
+#endif
+#ifdef DEBUG
+ EQUS " debug"
+#endif
+EQUB 13
+.StartupCopyright
+EQUS "(C) Copyright J.G.Harston 1989-",YEAR$,13
+EQUB 0
+ALIGN
+
+; NEW - Terminate program in memory
+; ---------------------------------
+; PAGE?0=13
+; PAGE?1=255
+; TOP=PAGE+2
+; Clear heap: LOMEM=TOP, VAREND=TOP, DATAPTR=PAGE
+; Clear dynamic variables
+; STACK=HIMEM
+; Continue into immediate mode
+.cmdNEW
+mov SV_PAGE,r0			; Get start of program
+mov #&FF0D,(r0)+		; Put in program terminator
+mov r0,SV_TOP			; Set TOP
+
+; Immediate mode
+; --------------
+.ImmediateClearStop
+clr  SV_AUTO			; Clear AUTO line
+.ImmediateClear			; Clear heap and initialise variable addresses
+jsr pc,VarsHeapInit		; LOMEM=TOP, VAREND=TOP, DATAPTR=PAGE, STACK=HIMEM
+.ImmediateLoop
+mov SV_HIMEM,sp			; Put system stack at top of memory
+clr SV_ONERR			; Cancel ON ERROR, before OSWRCH in case it errors
+clr SV_LINE			; Clear current line
+mov #ASC">",r0
+;jsr pc,IO_WRCH			; Print ">" prompt
+mov SV_AUTO,r4			; Get current line
+beq ImmNotAuto			; No AUTO line
+mov r4,-(sp)			; Save line number
+movb SV_STEP,r1			; Get AUTO STEP
+bic #&FF00,r1			; Ensure 8-bit value
+add r1,r4			; Add STEP to AUTO line
+cmp #&FF00,r4
+bcs ImmediateClearStop		; Run out of line numbers
+;bcs errTooBig			; Run out of line numbers
+mov r4,SV_AUTO			; Store updated AUTO line
+mov (sp)+,r4			; Get line number back
+mov r4,SV_LINE			; Set current line number
+mov #5,r1			; Print 5 digits
+jsr pc,PrintLineNumber		; Output r4 as line number
+mov #ASC" ",r0
+.ImmNotAuto
+jsr pc,IO_WRCH			; Print a space or ">" prompt
+;.ImmNotAuto
+adr SV_STRING,r1		; Point to string buffer
+mov r1,r5			; Prepare r5=>input line in case error occurs
+; above prob. no longer needed as Error doesn't use R5
+jsr pc,IO_ReadLine		; Read a line of input and zero COUNT
+;adr SV_STRING,r5		; Point to entered string in buffer
+jsr pc,TokeniseLine		; Tokenise entered line
+bne ImmLineNum			; Line number, enter line
+mov r4,r5			; Get start of tokenised line to line pointer
+clr -(sp)			; Push zero word at top of stack
+jmp Execute			; Execute immediate line
+
+; OLD - Attempt to recover program in memory
+; ------------------------------------------
+; PAGE?0=13
+; PAGE?1=0
+; Find TOP
+; Clear heap: LOMEM=TOP, VAREND=TOP, DATAPTR=PAGE
+; Clear dynamic variables
+; STACK=HIMEM
+; Continue into immediate mode
+.cmdOLD
+mov SV_PAGE,r0			; Get start of program
+mov #&000D,(r0)			; Remove program terminator
+jsr pc,FindTOP			; Check program, R5=>end of program
+br ImmediateClear		; Clear heap, jump to immediate mode
+
+; Check amount of free memory
+; ---------------------------
+; CheckFreeMemory - check for more than 256 bytes between heap and stack
+; CheckFreeMemR1  - check for more than 256 bytes between heap and R1
+;
+.CheckFreeMemory
+;mov  sp,r0
+mov  sp,r1
+;.CheckFreeMemR0
+;sub  #256,r0
+;sub  SV_VAREND,r0
+.CheckFreeMemR1
+sub  #256,r1
+sub  SV_VAREND,r1
+bcc  InsAddDone
+.errNoRoom
+jsr  pc,Error
+equb 0,"No room",0
+align
+
+; Enter line into program
+; -----------------------
+.ImmLineNum
+; R4=>start of tokenised line
+; R3= length of tokenised line excluding <cr>
+; R2= linenum
+;
+mov  r4,r5
+mov  r2,r4			; R5=>source, R4=linenum, R3=length
+jsr  pc,FindTOP			; Ensure program consistancy, R1=TOP, R0=corrupted
+add  r3,r1			; R1=TOP+linelength
+add  #64,r1			; Plus a bit of overhead
+sub  sp,r1			; Enough space to add line?
+bcc  errNoRoom			; No, generate error
+jsr  pc,LineFind		; Find line number, R1=insert point, R5/4/3=preserved
+bne  InsNewLine 		; No existing line to be removed
+;
+; Remove existing line
+; R5=>start of tokenised line to insert
+; R4=line number
+; R3=line length
+; R2=corrupted
+; R1=>insert point
+; R0=corrupted
+;
+mov  r1,-(sp)			; Save insertion point
+movb 3(r1),r2			; r2=line length
+bic  #&FF00,r2
+add  r1,r2			; r2=start of next line
+br   InsRemLineLp2		; Branch to start by copying <cr>
+.InsRemLineLp1
+movb (r2)+,(r1)+		; Copy line number low byte
+movb (r2)+,(r1)+		; Copy line length
+.InsRemLineLp2
+movb (r2)+,r0			; Copy character from line
+movb r0,(r1)+
+cmpb r0,#13
+bne  InsRemLineLp2		; Copy until <cr> byte
+movb (r2)+,r0			; Copy line number high byte
+movb r0,(r1)+
+cmpb r0,#&FF			; Is it end-of-prog marker?
+bne  InsRemLineLp1		; Not end of program, loop to copy more
+mov  r1,SV_TOP			; Update TOP, byte after &FF terminator
+mov  (sp)+,r1			; Get insertion point back
+;
+; R5=>start of tokenised line to insert
+; R4=line number
+; R3=line length
+; R2=xxxx
+; R1=>insert point
+; R0=xxxx
+.InsNewLine
+tst  r3
+beq  InsLineDone		; No new line, done
+add  #4,r3			; R3=number of bytes needed to insert
+mov  SV_TOP,r2
+mov  r2,r0			; R0=TOP
+add  r3,r2			; R2=TOP+length
+mov  r2,SV_TOP			; New TOP
+.InsInsLine
+movb -(r0),-(r2)		; Move bytes upwards
+cmp  r0,r1
+bne  InsInsLine			; Loop until insertion point
+inc  r1				; Step past initial <cr>
+jsr  pc,InsertLine		; Copy line at R5 into program at R1
+.InsLineDone
+br ImmediateClear		; Clear heap as program modified
+
+; R5=>start of tokenised line to insert
+; R4=line number
+; R3=line length
+; R2=xxxx
+; R1=>insert point - return updated
+; R0=xxxx
+.InsertLine
+swab r4
+movb r4,(r1)+			; Line number high byte
+swab r4
+movb r4,(r1)+			; Line number low byte
+movb r3,(r1)+			; Line length
+.InsAddLine
+movb (r5)+,r0			; Copy byte from input line
+movb r0,(r1)+			;  to program space
+cmpb r0,#13
+bne  InsAddLine			; Loop until <cr>
+.InsAddDone
+rts  pc
+
+.errTooBig
+jsr pc,Error
+equb 20,"Too big",0
+align
+
+; Parse line number parameters
+; ----------------------------
+; On entry, r4=default first parameter
+;           r3=default second parameter
+; On exit,  r4=first parameter
+;           r3=second parameter
+;           CC=only one parameter
+;           CS=zero or two parameters
+;
+.ParseLines10
+mov  #10,r4
+mov  r4,r3		; Default to 10,10
+.ParseLines
+jsr  pc,CheckEndStatement ; Any parameters?
+beq  ParseLinesDone	; No, use defaults
+mov  r3,-(sp)		; Save second default
+jsr  pc,ReadLineNumber	; r4/r3=start line number
+bcs  errTooBig		; *NB* 6502 BASIC gives Syntax error here
+mov  (sp)+,r3		; Get second default back
+jsr  pc,SkipSpaceThis
+cmpb r0,#ASC","
+clc			; CC=one parameter
+bne  ParseLinesOne	; No second parameter
+inc  r5			; Step past comma
+mov  r4,-(sp)
+jsr  pc,ReadLineNumber	; r4/r3=end line number/step
+bcs  errTooBig		; *NB* 6502 BASIC gives Syntax error here
+mov  r4,r3
+mov  (sp)+,r4
+.ParseLinesDone
+sec			; CS=zero or two parameters
+.ParseLinesOne
+rts  pc
+

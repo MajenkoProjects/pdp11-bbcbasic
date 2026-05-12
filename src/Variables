@@ -1,0 +1,743 @@
+; > Variables
+; Handle BASIC variables
+; 24-Feb-2009: Static integer variables and indirection
+; 25-Feb-2009: Reading $<addr> and $$<addr>
+; 15-May-2010: VarFind returns combined type/size in r3, <base><ind><off> works
+; 31-Jan-2012: Finds and creates dynamic variables, all heap items now word aligned
+;              cmdCLEAR now here, VarFind now never returns "invalid name", always gives an error
+; 23-Nov-2012: address|offset allowed
+; 09-Dec-2013: FindSubroutine moved to here so callable by AddrOf, VarFind tweeked to not
+;              store terminating bracket with PROCname(, FNname(
+; 02-Feb-2014: Array variables returned
+; 31-Aug-2015: fnREPORT moved here to return via FindStringVal
+ 
+
+; CLEAR - Clear heap
+; ==================
+; LOMEM=TOP
+; VAREND=TOP
+; DATAPTR=PAGE
+; STACK=HIMEM
+; Clear dynamic variables
+.cmdCLEAR		; Fall through
+.VarsHeapInit
+mov  SV_PAGE,SV_DATA	; DATAPTR=PAGE, start of program
+mov  (sp),r1		; Get return address
+mov  SV_HIMEM,sp	; Clear BASIC stack
+clr  -(sp)		; Put zero at top of stack
+mov  sp,SV_STACK	; Clear error stack
+mov  r1,-(sp)		; Stack return address
+mov  SV_TOP,r4		; r4=TOP
+br   VarsClear
+
+; LOMEM= - Set heap start, clearing heap
+; ======================================
+; Check for '=', evaluate integer
+; Set LOMEM
+; Set VAREND=LOMEM
+; Clear dynamic variables
+.cmdLOMEM
+jsr pc,EvalEqual	; Check for '=', get integer
+
+.VarsClear
+inc  r4			; Pad upwards, if LOMEM=TOP and TOP is odd
+bic  #1,r4		; Ensure word aligned
+mov  r4,SV_LOMEM	; Set new LOMEM, start of heap
+mov  r4,SV_VAREND	; Set new VAREND, end of heap
+adr  SV_VARPTR,r1			; Point to variables pointers
+mov  #(SV_ENDPTR-SV_VARPTR)/2,r0	; Number of pointers
+.VarsClearLp
+clr  (r1)+		; Clear this pointer
+dec  r0
+bne  VarsClearLp	; Loop for all pointers
+.VarFindExit1
+rts  pc
+
+
+; VarFindCreateAddress
+; ====================
+; Called from AddrOf function
+; r0= first character
+; r5=>first character
+;
+.VarFindCreateAddress
+tstb r0
+bpl  VarFindCreate	; Not FN/PROC, scan for variable
+
+; VarFindSubroutine - Find a FN/PROC in the heap, or in the program
+; =================================================================
+; On entry, r0= FN/PROC token
+;           r5=>FN/PROC at start of name
+; On exit,  Error if doesn't exist
+;             r5=>after end of variable name
+;             r4=address of data block
+;           r3/r2/r1/r0=corrupted
+;
+.VarFindSubroutine
+inc  r5			; r5=>FN/PROC name
+
+; FindSubroutine - called here from FN/PROC dispatch
+; --------------------------------------------------
+; On entry, r0= FN/PROC token
+;           r5=>first character of name
+;
+.FindSubroutine
+mov  r0,-(sp)		; Save FN/PROC token
+jsr  pc,VarFindPROC	; Look for FN/PROC in heap
+bne  FindSubFound	; In heap, jump to call it
+
+; Look for DEFPROC/DEFFN in program
+;  r4=>heap pointer to add to
+;  r5=>1st char of name
+;
+mov  SV_PAGE,r1
+.FindSubSearch
+mov  #tknDEF,r0
+jsr  pc,TokenFind	; Look for a line starting with DEF
+bcc  errNoSuchPROC	; End of program with no match found
+.FindSubSpace
+movb (r1)+,r0
+cmpb r0,#ASC" "
+beq  FindSubSpace	; Skip spaces after DEF
+cmpb r0,(sp)		; Is it a FN/PROC
+bne  FindSubSearch	; No, keep looking
+
+; We've now found a DEFPROC or a DEFFN
+;  r5=>start of FN/PROC name in call
+;  r4=>heap pointer to add to
+;  r1=>start of FN/PROC name in definition
+
+mov  r5,r3
+mov  r1,r2
+.FindSubLp
+movb (r1)+,r0		; Get character from definition name
+jsr  pc,VarChkChar	; End of definition name?
+bcs  FindSubMatch	; Yes, check for end of calling name
+cmpb r0,(r3)+		; Does it match call name?
+beq  FindSubLp		; Yes, loop to check more characters
+bne  FindSubSearch	; No match, look for another DEF
+.FindSubMatch
+movb (r3)+,r0		; Get character from call name
+jsr  pc,VarChkChar	; End of name calling name?
+bcc  FindSubSearch	; Not end of calling name, look for another
+dec  r3
+dec  r1
+
+; We've now found a matching DEFPROC or a DEFFN
+;  r5=>start of FN/PROC name in call
+;  r4=>heap pointer to add to
+;  r3=>end of FN/PROC name in call
+;  r1=>end of FN/PROC name in definition
+
+mov  (sp),r2		; r2=FN/PROC token
+mov  r1,-(sp)		; Save destination address
+jsr  pc,VarCreate	; Create entry in heap
+
+;  r0= terminating calling character
+;  r2= FN/PROC token
+;  r3= corrupted
+;  r4=>data block
+;  r5=>just after calling FN/PROC name
+; (sp)= destination address
+
+mov  (sp)+,(r4)		; Store dest address in heap
+.FindSubFound
+mov (sp)+,r0
+rts  pc
+
+.errNoSuchPROC
+jsr  pc,Error
+equb 29,"No such ",tknFN,"/",tknPROC,0
+align
+
+
+; VarFindCreate - Find a variable, and create it if non-existant
+; ==============================================================
+; On entry, r5=>first character of name
+; On exit,  CS=bad variable name - error generated
+;           CC=valid variable name
+;           NE=variable found
+;             r5=>after end of variable name
+;             r4=address of data block
+;             r3=size/type of variable
+;                0001 - byte
+;                0004 - integer
+;                0005 - real
+;                8000 - dynamic string
+;                8100 - $string
+;                8200 - $$string
+;                4xxx - array of number
+;                Cxxx - array of string
+;           r2/r1/r0=corrupted
+;
+.VarFindCreate
+jsr  pc,SkipSpaceThis
+.VarFindCreate1
+jsr  pc,VarFindExist	; Look for variable
+bne  VarFindExit1	; NE - Variable found
+clr  r2			; r2=0 - not FN/PROC
+; Valid variable name, but doesn't exist
+; r4=>last link, aligned
+; r5=>second character of variable name
+; r2=0   - not FN/PROC or array - don't create entry ending with '('
+; r2<>0  - FN/PROC or array - ok to create entry ending with '('
+; r2<&80 - array   - include '(' in entry name
+; r2>&7F - FN/PROC - don't include '(' in entry name
+
+; Variable info block layout:
+;     <link><name><00><aa><bb><cc><dd><ee>
+;    <link><name>%<00><aa><bb><cc><dd>
+;    <link><name>$<00><ll><hh><len><max>
+;    <link><name>(<00><ll><hh>
+;   <link><name>%(<00><ll><hh>
+;   <link><name>$(<00><ll><hh>
+; <link><procname><00><ll><hh>
+;   <link><fnname><00><ll><hh>
+
+.VarCreate
+mov  r5,-(sp)		; Save pointer to variable name
+mov  #16+256,r1		; Size of info block plus some overhead
+.VarCreateLp1
+inc r1			; Count length of variable name
+movb (r5)+,r0		; Get variable name character
+jsr  pc,VarChkChar
+bcc  VarCreateLp1	; Loop for valid characters
+
+;This is wrong place for this test
+;tst  r2
+;bne  VarCreate0	; PROC/FN, terminating '(' allowed
+;cmpb r0,#ASC"("
+;bne  VarCreate0
+;jmp  errArray		; Arrays must already exist
+;.VarCreate0
+
+mov  SV_VAREND,r0	; End of heap, will be aligned if not manually messed with
+add  r0,r1		; Add length of variable name and info block
+cmp  r1,sp		; Would this overlap stack?
+bcs  VarCreate1
+jmp  errNoRoom
+.VarCreate1
+mov  (sp)+,r5		; Get pointer to variable name
+mov  r0,(r4)		; Point current link to new info block at VAREND
+mov  r0,r4		; r4=>new variable info block
+clr  (r4)+		; Set next link to zero
+.VarCreateLp2
+movb (r5)+,r0		; Get variable name character
+movb r0,(r4)+		; Store in info block
+jsr  pc,VarChkChar
+bcc  VarCreateLp2	; Loop to end of variable name
+;
+;  r5=v
+;    a
+;    a(
+;    a%
+;    a$
+;    a%(
+;    a$(
+;   ab
+;   ab%
+;   ab$
+;   ab(
+;   ab%(
+;   ab$(
+
+mov  #&4000,r3		; r3=&4000 - FN/PROC
+tstb r2
+bmi  VarCreatePROC	; FN/PROC, don't add '(' to name
+;mov  #&8000,r3		; r3=&8000 - dynamic string
+asl  r3 		; r3=&8000 - dynamic string
+cmpb r0,#ASC"$"
+beq  VarCreateIntStr
+mov  #&0004,r3		; r3=&0004 - integer
+cmpb r0,#ASC"%"
+beq  VarCreateIntStr
+inc  r3			; r3=&0005 - real
+cmpb r0,#ASC"("
+beq  VarCreateArray	; Array or PROC(/FN(
+.VarCreatePROC
+dec  r5			; Point program back to terminating character
+dec  r4			; Step back to terminator
+br   VarCreateInfo
+.VarCreateIntStr
+movb (r5),r0
+cmpb r0,#ASC"("
+bne  VarCreateInfo
+inc  r5			; Step past '('
+movb r0,(r4)+		; Store '(' in info block
+.VarCreateArray
+bis  #&4000,r3		; Array
+.VarCreateInfo
+clrb (r4)+		; Store terminator
+clrb (r4)+		; Pad to align
+bic  #1,r4		; Ensure aligned
+mov  r4,r1		; r4=>data block
+clr  (r1)+		; Clear first two bytes for array
+bit  #&4000,r3
+bne  VarCreateDone	; Array
+clr  (r1)+		; Clear two more bytes for String or Integer
+bit  #&0001,r3
+beq  VarCreateDone	; Not real
+clr  (r1)+		; Clear two more bytes for real
+.VarCreateDone
+mov  r1,SV_VAREND	; Update end of heap
+rts  pc			; r4=>data block
+			; r3= data type/size
+
+
+; VarFindExist - Find an existing variable
+; ========================================
+; On entry, r5=>first character of name
+; On exit,  CS=bad variable name - error generated
+;             r5=preserved
+;           CC=valid variable name
+;           EQ=variable not found
+;             r5=>first character of variable name
+;             r4=address of previous linked list
+;           NE=variable found
+;             r5=>after end of variable name
+;             r4=address of data block
+;             r3=size/type of variable
+;                0001 - byte
+;                0004 - integer
+;                0005 - real
+;                8000 - dynamic string
+;                8100 - $string
+;                8200 - $$string
+;                4xxx - array of number
+;                Cxxx - array of string
+;           r2/r1/r0=corrupted
+;
+.VarFindExist
+movb (r5),r0		; Get first character
+clr  r4			; Zero base for !x, ?x, |x
+cmpb r0,#ASC"!"
+beq  VarFindIndirect	; Evaluate !x as 0!x
+cmpb r0,#ASC"?"
+beq  VarFindIndirect	; Evaluate ?x as 0?x
+cmpb r0,#ASC"|"
+beq  VarFindIndirect	; Evaluate |x as 0|x
+cmpb r0,#ASC"$"
+beq  VarFindChkDol	; Evaluate $<addr> and $$<addr>
+cmpb r0,#ASC"@"
+bcs  VarBadName		; Bad variable name, r5 preserved
+
+; VarFindVariable - Find a variable ignoring indirections
+; -------------------------------------------------------
+.VarFindVariable
+movb (r5)+,r0		; Get first character
+cmp  r0,#ASC"["
+bcc  VarFindDyn		; --> needs to call, then check for |?!
+cmpb (r5),#ASC"%"	; Is it <uc>% ?
+bne  VarFindDyn		; No, look for dynamic variable --> indir
+cmpb 1(r5),#ASC"("	; Is it <uc>%( ?
+beq  VarFindDyn		; Yes, look for dynamic array entry --> indir
+inc  r5			; Step past <uc>%
+add  r0,r0
+add  r0,r0		; r0=ASC"<uc>"*4
+adr  SV_VARS-4*ASC"@",r4
+add  r0,r4		; r4=><data block>
+mov  #4,r3		; r3=&0004, integer - number, four bytes
+.VarFindCheckIndir
+movb (r5),r0
+cmpb r0,#ASC"!"		; Is it var!offset ?
+beq  VarFindIndir
+cmpb r0,#ASC"?"		; Is it var?offset ?
+beq  VarFindIndir
+cmpb r0,#ASC"|"		; Is it var|offset ?
+;;clc
+bne  VarFindExit	; NE=found
+mov  r5,r1		; Save program pointer in R1
+inc  r5			; Step past |
+jsr  pc,CheckEndStatement
+bne  VarFindIndirReal	; Not expression|
+mov  r1,r5		; Restore program pointer, also NE=found
+;;clc			; CC=ok, NE=found
+;;.VarBadName
+.VarFindExit
+rts  pc
+.VarBadName
+jmp  errSyntax
+;
+.VarFindIndirReal
+movb #ASC"|",r0		; Restore r0="|"
+mov  r1,r5		; Point back to indir operator
+.VarFindIndir		; A%?num or A%!num
+mov  r0,-(sp)		; Stack indirection operator
+jsr  pc,VarFindValNum	; Get value of <uc>% to r4
+br   VarFindInd2
+.VarFindChkDol
+cmpb 1(r5),#ASC"$"	; Is it $$<addr> ?
+bne  VarFindIndirect	; No, jump for $<addr>
+inc  r5			; Step past first '$'
+inc  r0			; Make operator '%'
+.VarFindIndirect
+mov  r0,-(sp)		; Stack indirection operator
+.VarFindInd2
+mov  r4,-(sp)		; Stack base address
+inc  r5			; Step past indirection operator
+jsr  pc,EvalIntVal	; Evaluate following numeric
+add  (sp)+,r4		; Add stacked base to numeric
+mov  (sp)+,r3		; Get indirection operator back
+cmpb r3,#ASC"!"
+beq  VarFindPling	; Return with size=4
+cmpb r3,#ASC"$"
+beq  VarFindDollar	; Return fixed cr-string
+cmpb r3,#ASC"%"
+beq  VarFindDouble	; Return fixed null-string
+cmpb r3,#ASC"?"
+beq  VarFindQuery	; CC=ok, return with size=1
+mov  #5,r3		; |offset, float - number, five bytes
+;;clc			; CC=ok, NE=found (clc not needed)
+rts  pc
+.VarFindPling
+mov  #4,r3		; name?offset - four bytes, sets NE=found
+rts  pc
+.VarFindQuery
+mov  #1,r3		; name?offset - single byte, sets NE=found
+rts  pc
+.VarFindDollar
+mov  #&8100,r3		; type=cr-string, sets NE=found
+rts  pc
+.VarFindDouble
+mov  #&8200,r3		; type=null-string, sets NE=found
+rts pc
+
+; Look for a FN/PROC in the heap
+; ------------------------------
+; On entry, r0= first character of name, FN/PROC
+;           r5=>second character
+;
+.VarFindPROC
+mov  #SV_PROCPTR-SV_VARPTR,r1
+cmpb r0,#tknPROC
+beq  VarFindDyn1	; Look through PROC list
+mov  #SV_FNPTR-SV_VARPTR,r1
+br   VarFindDyn1	; Look through FN list
+
+; Look for a variable in the heap
+; -------------------------------
+; On entry, r0= first character of variable
+;           r5=>second character
+;
+.VarFindDyn
+jsr  pc,VarChkLetter
+bcs  VarBadName		; Starts with invalid character
+add  r0,r0		; r0=initial letter * 2
+.VarFindDyn1
+adr  SV_VARPTR-2*ASC"A",r4
+add  r0,r4		; r4=pointer to linked list
+;
+.VarFindNext
+;;clc
+mov  (r4),r0		; Get pointer to next item
+beq  VarFindExit	; End of linked list, exit with EQ, r4=>pointer, r5=>2nd char of name
+mov  r0,r4		; r4=>current information block
+mov  r5,r3		; r3=>second character of variable name
+mov  r4,r2
+add  #2,r2		; r2=>start of stored variable name
+.VarFindLp
+movb (r2)+,r0		; Get character from stored variable name
+cmpb r0,(r3)+		; Does it match program variable name
+beq  VarFindLp		; Yes, loop to check more characters
+tst  r0			; End of stored variable name?
+bne  VarFindNext	; No, look for another name
+;
+dec  r3			; Point back to nonmatching character
+dec  r3			; Point back to last matching character
+movb (r3),r1		; Get last matching character
+cmpb r1,#ASC"("
+beq  VarFindArray	; It's an array
+inc  r3
+movb (r3),r0		; Get nonmatching character
+jsr  pc,VarChkType	; Check if valid variable name or suffix character
+bcs  VarFindArray	; No more characters, check for array
+tstb -1(r5)		; Check first character of name
+bpl  VarFindNext	; Not a FN/PROC, look for another name
+jsr  pc,VarChkChar	; Test for middle character
+bcc  VarFindNext	; More characters in FN/PROC name, look for another name
+br   VarProcFound	; FN/PROC name found
+.VarFindArray
+dec  r3			; Step back to type character
+movb (r3)+,r0		; Get type character, step past character
+inc  r3			; Step past '('
+sbc  r3			; Step back if not '('
+.VarProcFound
+mov  r3,r5		; r5=>character after end of name
+mov  r2,r4		; r4=>variable data block
+inc  r4
+bic  #1,r4		; Align data block
+mov  #&8000,r3		; Type=string
+cmpb r0,#ASC"$"
+beq  VarFound
+mov  #&0004,r3		; Type=integer
+cmpb r0,#ASC"%"
+beq  VarFound
+inc  r3			; Type=real
+.VarFound
+cmpb r1,#ASC"("
+beq  VarArrayFound	; Check for array references
+tst  r3			; NE=found, MI=string, PL=number
+bmi  VarFindExit3	; Exit with string
+jmp  VarFindCheckIndir	; Number - test for indirection
+; matching variable name found
+; name<00>
+; name%<00>
+; name$<00>
+
+.VarArrayFound
+cmpb (r5),#ASC")"	; Is it array()
+bne  VarArrayIndex
+inc  r5			; Step past ')'
+bis  #&4000,r3		; NE=found, &40=array, MI=string, PL=number
+.VarFindExit3
+;;clc			; CC=ok
+rts  pc
+; name(<00>
+; name%(<00>
+; name$(<00>
+
+.VarArrayIndex
+; r5=>m,n,o,p)
+; r4=>pointer to array info
+;mov  (r4),r4		; r4=>array info
+;beq  errArray		; Array undefined
+;
+; r4=>dims, dim1, dim2, dim3, dim4
+; r3=object type &8000, &0005, &0004
+;
+mov  r3,-(sp)		; Save object type
+mov  (r4)+,-(sp)	; Save number of dimensions
+clr  -(sp)		; Save initial index into array
+mov  r4,-(sp)		; Save address of dimensions list
+br   VarArrayParse
+.VarArrayLp
+cmpb (r5)+,#ASC","
+bne  errBadSubscript
+mov  r3,-(sp)		; Stack current index
+mov  r1,-(sp)		; Stack pointer to current dimension
+.VarArrayParse
+jsr  pc,EvalInteger	; Evaluate dimension
+tst  r3
+bne  errBadSubscript	; sub>65535 - too big
+mov  (sp)+,r1		; r1=>current dimension
+mov  (r1)+,r3		; r3= current dimension
+inc  r3			; Add one to get dimension size
+cmp  r4,r3		; Is subscript larger than dimension?
+bcc  errBadSubscript
+mov  (sp)+,r2		; r2=current index
+;
+; sp=>num, type
+; r4=subscript
+; r3=current dimension max
+; r2=current index
+; r1=>next dimension
+;
+#ifndef NOMUL
+mul  r2,r3		; r3=r2*r3 - offset=offset*size
+#else
+jsr  pc,R2timesR3toR3	; r3=r2*r3 - offset=offset*size
+#endif
+add  r4,r3		; offset=offset*size+subscript
+dec  (sp)		; Decrement number of dimensions
+bne  VarArrayLp		; Parse next subscript
+jsr  pc,CheckClose
+tst  (sp)+		; Pop num
+;
+mov  (sp)+,r2		; Get object type
+mov  r3,r4
+asl  r4
+asl  r4			; r4=index*4
+bit  r2,#1
+beq  VarArrayAdd
+add  r3,r4		; r4=index*5
+.VarArrayAdd
+add  r1,r4		; r4=>data item
+mov  r2,r3		; r3=object size, NE=variable found
+rts  pc
+
+.errArray
+jsr  pc,Error
+equb 14,"Array",0
+align
+.errBadSubscript
+jsr  pc,Error
+equb 15,"Subscript",0
+align
+
+
+; VarFindVal - Find a variable and return its value
+; =================================================
+; On entry, r5=>first character of name
+; On exit,  r4/r3/r2=value
+;           r1/r0=corrupted
+;
+.VarFindVal
+jsr  pc,VarFindExist	; Find existing variable
+;;bcs  jmpNoSuchVar	; Bad variable name
+; test here for OPT 2 in assembler
+beq  errNoSuchVar	; Variable not found
+.VarFindValFetch
+bit  #&4000,r3
+bne  errArray		; Can't do =array() like this
+tst  r3			; r3=1/4/5 int/byte/float, r3=8xxx string
+bmi  VarFindString	; If string, pointing to string descriptor
+.VarFindValNum
+clr  r2			; Prepare for integer
+movb (r4)+,r0		; Get first byte
+bic  #&FF00,r0
+dec  r3
+beq  VarFindByte	; Single byte
+movb (r4)+,r1		; Get second byte
+bic  #&FF00,r1
+swab r1
+bis  r1,r0		; r0=1st/2nd bytes
+movb (r4)+,r1		; Get third byte
+movb (r4)+,r2		; Get fourth byte
+bic  #&FF00,r1
+bic  #&FF00,r2
+swab r2
+bis  r2,r1		; r1=3rd/4th bytes
+clr  r2			; Prepare for word
+cmp  r3,#3
+beq  VarFindWord
+movb (r4),r2		; Get fifth byte for float
+bic  #&FF00,r2
+.VarFindWord
+mov  r1,r3
+.VarFindByte
+mov  r0,r4
+;;clc
+tst  r2
+rts  pc
+
+.fnREPORT
+cmpb (r5)+,#ASC"$"	; Check for '$'
+bne  errNoSuchVar
+mov  SV_FAULT,r4
+inc  r4			; r4=>error string
+mov  #&8200,r3		; r3=null-string
+			; Fall through to find length of null-string
+
+; VarFindString - convert string description into full string
+; -----------------------------------------------------------
+; If a string found, registers will hold:
+; r3=&8000, r4=>aligned string descriptor block = addr.lo, addr.hi, length, allocated
+; r3=&8100, r4=>start of cr-string
+; r3=&8200, r4=>start of null-string
+.VarFindString
+mov  r3,r2		; r2=string type
+clr  r3			; Set length to zero
+clr  r0			; Look for CHR$0
+bit  #&0200,r2		; A null-string?
+bne  VarFindStrCount
+mov  #13,r0		; Look for CHR$13
+bit  #&0100,r2		; A cr-string?
+bne  VarFindStrCount
+movb 2(r4),r3		; Get string length
+bic  #&FF00,r3		; 8-bit length
+mov  (r4),r4		; Get string start address
+clc			; CLC=OK
+tst  r2			; Set flags from string type, also clears Carry
+rts  pc
+.VarFindStrCount
+mov  r4,r1		; Copy start address to r1
+.VarFindStrLp
+inc  r3			; Increment length
+cmp  r3,#256		; String too long?
+bcc  VarFindStrZero	; No terminator, return null
+cmpb (r1)+,r0		; Terminator found?
+bne  VarFindStrLp	; No, loop until found or too long
+dec  r3			; Remove terminator from count
+clc			; CLC=OK
+tst  r2			; Set flags from string type, also clears Carry
+rts  pc
+.VarFindStrZero
+clr  r3			; Return zero-length string
+;;clc			; CLC=OK
+tst  r2			; Set flags from string type, also clears Carry
+rts  pc
+.errNoSuchVar
+jsr pc,Error
+equb 26,"No such variable",0
+align
+
+
+; Array function
+; ==============
+; =DIM(array())   - returns number of dimensions
+; =DIM(array(),n) - return size of dimension n
+;
+#ifndef NOEXTRAFN
+.fnDIM
+cmpb (r5)+,#ASC"("	; Check for opening bracket
+bne  errArray
+jsr  pc,VarFindExist	; Look up array
+beq  errNoSuchVar	; Array doesn't exist
+bit  #&4000,r3
+beq  errArray		; Not an array variable
+;mov  (r4),r4		; Get start of array data
+;beq  errArray		; Array Undimensioned
+jsr  pc,SkipSpaceThis
+cmpb r0,#ASC","
+bne  fnDIM2		; Jump with DIM(array()) to return number of dimensions
+
+; =DIM(array(),n)
+; ---------------
+mov  r4,-(sp)		; Save address of array info
+jsr  pc,EvalComma
+tst  r3
+bne  errBadSubscript	; =DIM(array(),>65535)
+tst  r4
+beq  errBadSubscript	; =DIM(array(),0)
+mov  (sp)+,r3		; r3=>array info
+cmp  (r3),r4
+bcs  errBadSubscript	; =DIM(array(),n) where n is too large
+add  r4,r4		; Double r4
+add  r3,r4		; Add to base of array info
+.fnDIM2
+jsr  pc,CheckClose
+;.fnDIM3
+mov  (r4),r4		; Get number of dimensions or dimension size
+clr  r3
+clr  r2
+;.fnDIMexit
+rts  pc
+#endif
+
+
+; Check if char is valid for a variable name
+; ------------------------------------------
+; CS    - invalid variable name character
+; CC    - valid variable name character
+; CC EQ - valid terminating character $ % (
+;
+.VarChkType		; Test for any character
+cmpb r0,#ASC"("
+beq  VarChkCharOk	; '(' - exit with CC, EQ
+cmpb r0,#ASC"$"
+beq  VarChkCharOk	; '$' - exit with CC, EQ
+cmpb r0,#ASC"%"
+beq  VarChkCharOk	; '%' - exit with CC, EQ
+;
+.VarChkChar		; Test for middle character
+cmpb r0,#ASC"0"
+bcs  VarChkCharOk	; <'0' - exit with CS
+cmpb #ASC"9",r0
+bcc  VarChkCharCC	; '0'-'9' - exit with CC, NE
+;
+.VarChkLetter		; Test for starting character
+cmpb r0,#ASC"A"
+bcs  VarChkCharOk	; ':'-'@' - exit with CS
+cmpb #ASC"Z",r0
+bcc  VarChkCharCC	; 'A'-'[' - exit with CC, NE
+cmpb r0,#ASC"_"
+bcs  VarChkCharOk	; '['-'^' - exit with CS
+cmpb #ASC"z",r0
+bcs  VarChkCharOk	; >'z' - exit with CS
+			; '_'-'z' - exit with CC, NE
+.VarChkCharCC
+tst  r0			; NE, also clears carry
+clc			; CC
+.VarChkCharOk
+rts  pc
+

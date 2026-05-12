@@ -1,0 +1,626 @@
+; > Tokens
+; Token table - ok
+; Tokeniser   - ok
+; Detokeniser - ok
+; 08-Mar-2009: Tokeniser sped up using offsets for each initial letter, linenums tokenised.
+; 09-Mar-2009: LineFind written.
+; Tokeniser can be sped up if search terminates when initial letter no longer matches
+; 24-Jul-2013: Fixed bug where '*' turned off tokenising in middle of statement
+; 07-Dec-2013: TokenFind written.
+; 14-Jul-2017: Tokeniser optimised, returns R3=length, R4=>string to match rest of interpreter
+; 08-May-2020: TokenFind doesn't skip <cr> at end of zero-length lines.
+; 09-May-2020: PROC@LOAD, FN@SAVE allowed - @ is valid identifier character.
+;              IF thing THEN var=1:IF thing THEN =1 doesn't tokenise the number
+;              Tokeniser optimised by calling EvalCheckDigit and VarCheckChar.
+; 18-Mar-2024: Added SLOWTOKEN option, spaces don't reset tokeniser so ON ERROR PAGE= works.
+; 27-Apr-2025: End of hex string steps back so, eg &12OR3 tokenises correctly.
+; 25-Nov-2025: Bit of optimisation of tokeniser when token matched.
+;              REM/DATA only turn tokeniser off at start of statement, allows LOCAL DATA:...
+;              Two-byte tokens possible.
+
+; Acorn-style token table
+; =======================
+; string, token, flag
+;
+; Token flag:
+; Bit 0 - Conditional tokenisation (don't tokenise if followed by an alphabetic character).
+; Bit 1 - Not start of statement.
+; Bit 2 - Now middle of statement (command with parameters)
+; Bit 3 - Expect a line number (after a GOTO, etc...).
+; Bit 4 - Pseudo variable - add &40 token if at start of statement (external: hex number).
+; Bit 5 - FN/PROC keyword - don't tokenise name of the subroutine.
+; Bit 6 - Don't tokenise rest of line (REM, DATA, etc...)
+; Bit 7 - 2-byte token (external: quote toggle)
+
+.TokenTable
+.tknA	EQUB "AND"     ,&80,&02 ; 00000010
+	EQUB "ABS"     ,&94,&02 ; 00000010
+	EQUB "ACS"     ,&95,&02 ; 00000010
+	EQUB "ADVAL"   ,&96,&02 ; 00000010
+	EQUB "ASC"     ,&97,&02 ; 00000010
+	EQUB "ASN"     ,&98,&02 ; 00000010
+	EQUB "ATN"     ,&99,&02 ; 00000010
+	EQUB "AUTO"    ,&C6,&02 ; 00000010 ; was &0A
+.tknB	EQUB "BGET"    ,&9A,&03 ; 00000011
+	EQUB "BPUT"    ,&D5,&07 ; 00000111
+.tknC	EQUB "COLOUR"  ,&FB,&06 ; 00000110
+	EQUB "CALL"    ,&D6,&06 ; 00000110
+	EQUB "CHAIN"   ,&D7,&06 ; 00000110
+	EQUB "CHR$"    ,&BD,&02 ; 00000010
+	EQUB "CLEAR"   ,&D8,&03 ; 00000011
+	EQUB "CLOSE"   ,&D9,&07 ; 00000111
+	EQUB "CLG"     ,&DA,&03 ; 00000011
+	EQUB "CLS"     ,&DB,&03 ; 00000011
+	EQUB "COS"     ,&9B,&02 ; 00000010
+	EQUB "COUNT"   ,&9C,&03 ; 00000011
+	EQUB "COLOR"   ,&FB,&06 ; 00000110
+.tknD	EQUB "DATA"    ,&DC,&42 ; 01000010
+	EQUB "DEG"     ,&9D,&02 ; 00000010
+	EQUB "DEF"     ,&DD,&02 ; 00000010
+	EQUB "DELETE"  ,&C7,&02 ; 00000010 ; was &0A
+	EQUB "DIV"     ,&81,&02 ; 00000010
+	EQUB "DIM"     ,&DE,&06 ; 00000110
+	EQUB "DRAW"    ,&DF,&06 ; 00000110
+.tknE	EQUB "ENDPROC" ,&E1,&03 ; 00000011
+	EQUB "END"     ,&E0,&03 ; 00000011
+	EQUB "ENVELOPE",&E2,&06 ; 00000110
+	EQUB "ELSE"    ,&8B,&08 ; 00001000
+	EQUB "EVAL"    ,&A0,&02 ; 00000010
+	EQUB "ERL"     ,&9E,&03 ; 00000011
+	EQUB "ERROR"   ,&85,&00 ; 00000000
+	EQUB "EOF"     ,&C5,&03 ; 00000011
+	EQUB "EOR"     ,&82,&02 ; 00000010
+	EQUB "ERR"     ,&9F,&03 ; 00000011
+	EQUB "EXP"     ,&A1,&02 ; 00000010
+	EQUB "EXT"     ,&A2,&03 ; 00000011
+;	EQUB "EDIT"    ,&CE,&02 ; 00000010 ; was &0A
+.tknF	EQUB "FOR"     ,&E3,&06 ; 00000110
+	EQUB "FALSE"   ,&A3,&03 ; 00000011
+	EQUB "FN"      ,&A4,&22 ; 00100010
+.tknG	EQUB "GOTO"    ,&E5,&0E ; 00001110
+	EQUB "GET$"    ,&BE,&02 ; 00000010
+	EQUB "GET"     ,&A5,&02 ; 00000010
+	EQUB "GOSUB"   ,&E4,&0E ; 00001110
+	EQUB "GCOL"    ,&E6,&06 ; 00000110
+.tknH	EQUB "HIMEM"   ,&93,&17 ; 00010111
+.tknI	EQUB "INPUT"   ,&E8,&06 ; 00000110
+	EQUB "IF"      ,&E7,&06 ; 00000110
+	EQUB "INKEY$"  ,&BF,&02 ; 00000010
+	EQUB "INKEY"   ,&A6,&02 ; 00000010
+	EQUB "INT"     ,&A8,&02 ; 00000010
+	EQUB "INSTR("  ,&A7,&02 ; 00000010
+.tknJ
+.tknK
+.tknL	EQUB "LIST"    ,&C9,&02 ; 00000010 ; was &0A
+	EQUB "LINE"    ,&86,&02 ; 00000010
+	EQUB "LOAD"    ,&C8,&06 ; 00000110
+	EQUB "LOMEM"   ,&92,&17 ; 00010111
+	EQUB "LOCAL"   ,&EA,&06 ; 00000110
+	EQUB "LEFT$("  ,&C0,&02 ; 00000010
+	EQUB "LEN"     ,&A9,&02 ; 00000010
+	EQUB "LET"     ,&E9,&00 ; 00000000
+	EQUB "LOG"     ,&AB,&02 ; 00000010
+	EQUB "LN"      ,&AA,&02 ; 00000010
+.tknM	EQUB "MID$("   ,&C1,&02 ; 00000010
+	EQUB "MODE"    ,&EB,&06 ; 00000110
+	EQUB "MOD"     ,&83,&02 ; 00000010
+	EQUB "MOVE"    ,&EC,&06 ; 00000110
+.tknN	EQUB "NEXT"    ,&ED,&06 ; 00000110
+	EQUB "NEW"     ,&CA,&03 ; 00000011
+	EQUB "NOT"     ,&AC,&02 ; 00000010
+.tknO	EQUB "OLD"     ,&CB,&03 ; 00000011
+	EQUB "ON"      ,&EE,&06 ; 00000110
+	EQUB "OFF"     ,&87,&02 ; 00000010
+	EQUB "OR"      ,&84,&02 ; 00000010
+	EQUB "OPENIN"  ,&8E,&02 ; 00000010
+	EQUB "OPENOUT" ,&AE,&02 ; 00000010
+	EQUB "OPENUP"  ,&AD,&02 ; 00000010
+	EQUB "OSCLI"   ,&FF,&06 ; 00000110
+.tknP	EQUB "PRINT"   ,&F1,&06 ; 00000110
+	EQUB "PAGE"    ,&90,&17 ; 00010111
+	EQUB "PTR"     ,&8F,&17 ; 00010111
+	EQUB "PI"      ,&AF,&03 ; 00000011
+	EQUB "PLOT"    ,&F0,&06 ; 00000110
+	EQUB "POINT("  ,&B0,&02 ; 00000010
+	EQUB "PROC"    ,&F2,&26 ; 00100110
+	EQUB "POS"     ,&B1,&03 ; 00000011
+	EQUB "PUT"     ,&CE,&02 ; 00000010
+.tknQ
+;	EQUB "QUIT"    ,&98,&86 ; 10000110
+.tknR	EQUB "RETURN"  ,&F8,&03 ; 00000011
+	EQUB "REPEAT"  ,&F5,&02 ; 00000010
+	EQUB "REPORT"  ,&F6,&03 ; 00000011
+	EQUB "READ"    ,&F3,&06 ; 00000110
+	EQUB "REM"     ,&F4,&42 ; 01000010
+	EQUB "RUN"     ,&F9,&03 ; 00000011
+	EQUB "RAD"     ,&B2,&02 ; 00000010
+	EQUB "RESTORE" ,&F7,&0E ; 00001110
+	EQUB "RIGHT$(" ,&C2,&02 ; 00000010
+	EQUB "RND"     ,&B3,&03 ; 00000011
+	EQUB "RENUMBER",&CC,&02 ; 00000010 ; was &0A
+.tknS	EQUB "STEP"    ,&88,&02 ; 00000010
+	EQUB "SAVE"    ,&CD,&06 ; 00000110
+	EQUB "SGN"     ,&B4,&02 ; 00000010
+	EQUB "SIN"     ,&B5,&02 ; 00000010
+	EQUB "SQR"     ,&B6,&02 ; 00000010
+	EQUB "SPC"     ,&89,&02 ; 00000010
+	EQUB "STR$"    ,&C3,&02 ; 00000010
+	EQUB "STRING$(",&C4,&02 ; 00000010
+	EQUB "SOUND"   ,&D4,&06 ; 00000110
+	EQUB "STOP"    ,&FA,&03 ; 00000011
+;	EQUB "SYS"     ,&99,&86 ; 10000110
+.tknT	EQUB "TAN"     ,&B7,&02 ; 00000010
+	EQUB "THEN"    ,&8C,&08 ; 00001000
+	EQUB "TO"      ,&B8,&02 ; 00000010
+	EQUB "TAB("    ,&8A,&02 ; 00000010
+	EQUB "TRACE"   ,&FC,&0E ; 00001110
+	EQUB "TIME"    ,&91,&17 ; 00010111
+	EQUB "TRUE"    ,&B9,&03 ; 00000011
+.tknU	EQUB "UNTIL"   ,&FD,&06 ; 00000110
+	EQUB "USR"     ,&BA,&02 ; 00000010
+.tknV	EQUB "VDU"     ,&EF,&06 ; 00000110
+	EQUB "VAL"     ,&BB,&02 ; 00000010
+	EQUB "VPOS"    ,&BC,&03 ; 00000011
+.tknW	EQUB "WIDTH"   ,&FE,&06 ; 00000110
+	EQUB "PAGE"    ,&D0,&02 ; 00000010
+	EQUB "PTR"     ,&CF,&02 ; 00000010
+	EQUB "TIME"    ,&D1,&02 ; 00000010
+	EQUB "LOMEM"   ,&D2,&02 ; 00000010
+	EQUB "HIMEM"   ,&D3,&02 ; 00000010
+	EQUB "Missing ",&8D,&00 ; 00000000
+	EQUB &00
+	ALIGN
+#ifndef SLOWTOKEN
+.TokenOffsets
+EQUW tknA-TokenTable
+EQUW tknB-TokenTable
+EQUW tknC-TokenTable
+EQUW tknD-TokenTable
+EQUW tknE-TokenTable
+EQUW tknF-TokenTable
+EQUW tknG-TokenTable
+EQUW tknH-TokenTable
+EQUW tknI-TokenTable
+EQUW tknJ-TokenTable
+EQUW tknK-TokenTable
+EQUW tknL-TokenTable
+EQUW tknM-TokenTable
+EQUW tknN-TokenTable
+EQUW tknO-TokenTable
+EQUW tknP-TokenTable
+EQUW tknQ-TokenTable
+EQUW tknR-TokenTable
+EQUW tknS-TokenTable
+EQUW tknT-TokenTable
+EQUW tknU-TokenTable
+EQUW tknV-TokenTable
+EQUW tknW-TokenTable
+#endif
+
+.TokeniseEVAL
+mov  r4,-(sp)		; Save destination
+mov  #2,r2		; Set flags to 'within statement'
+br   TokenLoop
+
+; Tokenise entered line and line number
+; -------------------------------------
+; On entry, r5=>untokenised source, may have leading spaces
+; On exit,  R5=>after <cr> at end of input line
+;           R4=>start of tokenised line
+;           R3= length of tokenised line excluding <cr>
+;           R2= line number, EQ/NE set
+;
+.TokeniseLine
+jsr pc,ReadLineNumber	; r4=line number (CC) or zero (CS)
+bcs TokeniseLineNoNum	; No line number entered
+mov r4,SV_LINE		; Set current input line number
+.TokeniseLineNoNum	; r5=>start or line or after line number
+adr SV_INPUT,r4		; r4=>dest in input buffer
+			; Fall through into tokeniser
+
+; Tokeniser
+; =========
+; On entry, R5=>untokenised text
+;           R4=>destination buffer
+; Enter at  Tokenise     - use LISTO options
+;           TokenStrip   - strip leading spaces
+;           TokenNoStrip - keep leading spaces
+; Uses      R3=>token table address
+;           R2= current tokeniser flags
+;           R1= new tokeniser flags
+;           R0= character
+; On exit,  R5=>after <cr> at end of input line
+;           R4=>start of tokenised line
+;           R3= length of tokenised line excluding <cr>
+;           R2= line number, EQ/NE
+;
+.Tokenise
+movb SV_OPTIONS,r0
+beq  TokenNoStrip	; LISTO=0, don't strip leading spaces
+.TokeniseStrip
+cmpb (r5)+,#ASC" "
+beq  TokeniseStrip	; Skip leading spaces
+dec  r5
+.TokenNoStrip
+mov  r4,-(sp)		; Save destination
+.TokenZero
+clr  r2			; Clear tokeniser flags
+.TokenNext
+.TokenLoop
+movb (r5)+,r0		; Get current character
+cmp  r0,#9
+beq  TokenNext		; Skip any embedded TABs
+dec  r5			; Point to current character
+bit  #&F0,r2		; Any skip flags set?
+bne  TokenByte		; Inside quote/REM/PROCFN/hex
+bit  #&08,r2		; Is a line number expected?
+beq  TokenNotLine	; No, try to tokenise
+jsr  pc,TokeniseNumber	; Tokenise line number
+; CC=not a number, r5=>this character, r0=character
+; CS=number entered, r5=>next character
+bcs  TokenLoop
+.TokenNotLine
+cmp  r0,#ASC"A"		; Tokens start with a letter
+bcs  TokenByte		; <'A', enter character
+cmp  r0,#ASC"X"
+bcc  TokenByte		; >'W', enter character
+jsr  pc,TokenSearch	; Search token table
+			; Returns r5=>before next character
+			;         r4= unchanged, output pointer
+			;         r2= unchanged, current tokeniser flags
+			;         r1= new tokeniser flag
+			;         r0= byte to enter, token or char
+;bpl  TokenWord0	; Not a two-byte token
+;movb #&C8,(r4)+	; Insert prefix byte
+;bic  #128,r1
+;.TokenWord0
+bit  #2,r2		; Are we at the start of statement?
+bne  TokenWord1		; No, enter token/char
+bit  #16,r1		; Is this a pseudo-variable?
+beq  TokenWord2		; No, enter unchanged
+add  #&40,r0		; Convert token to command token
+.TokenWord1
+bic  #&40,r2		; Middle of statement, don't turn tokeniser off
+.TokenWord2
+mov  r1,r2		; Copy new flags to current flags
+.TokenByte
+inc  r5			; Increment input pointer
+movb r0,(r4)+		; Enter byte in output buffer
+bmi  TokenLoop		; Token entered, loop back
+cmp  r0,#ASC" "		; At end of line?
+beq  TokenSpace		; Terminate PROC/FN, hex, LineNum
+bcc  TokenNotCR		; Not end of line, jump to check character
+;movb SV_OPTIONS,r0
+;beq  TokenLineEnd	; LISTO=0, don't strip trailing spaces
+;strip trailing spaces
+;
+.TokenLineEnd
+movb #&FF,(r4)		; Put &FF after <cr>
+movb #13,-(r4)		; Ensure <cr> terminator
+			; R5=>after <cr> at end of source, for textload
+mov  r4,r3		; R3=>end of string
+mov  (sp)+,r4		; R4=>start of string
+sub  r4,r3		; R3=length of string
+mov  SV_LINE,r2		; R2=line number, EQ/NE set
+rts  pc
+
+.TokenNotCR
+cmp  r0,#34		; Is char quote?
+bne  TokenNotQuote	; No, jump to next check
+add  #128,r2		; Toggle quote flag
+br   TokenLoop		; Loop back to continue tokenising
+
+.TokenNotQuote
+bit  #&C0,r2		; Inside quotes or REM/DATA/*cmd?
+bne  TokenLoop		; Loop back, ignoring character
+cmp  r0,#&3A		; Is char colon?
+beq  TokenZero		; Loop back to reset to start of statement
+
+cmp  r0,#ASC"*"		; Is char star?
+bne  TokenNotStar	; No, jump to next check
+bit  #&02,r2		; At start of statement?
+bne  TokenLoop		; No, treat as normal character
+mov  #&40,r2		; Treat rest of line as comment
+br   TokenLoop		; Jump back to continue scanning line
+
+.TokenNotStar
+bis  #&02,r2		; Set 'not at start of statement'
+cmp  r0,#ASC"&"		; Is char hex number?
+bne  TokenNotHex	; No, jump to next check
+mov  #&10,r2		; Set 'scanning hex number'
+br   TokenLoop		; Continue scanning line
+
+.TokenNotHex
+bit  #&20,r2		; Scanning PROC/FN?
+bne  TokenPROCFN
+bit  #&10,r2		; Scanning hex?
+bne  TokenHex
+cmp  #ASC"@",r0		; Digits and punctuation, continue scanning
+br   TokenCheckEnd
+.TokenHex
+jsr  pc,CheckHexDigit	; Keep going through hex digits
+bcc  TokenLoop		; Still a hex character
+dec  r5			; Step back so eg &12OR3 tokenises
+dec  r4
+br   TokenSpace
+.TokenPROCFN
+jsr  pc,VarChkChar	; Still identifier, continue scanning
+.TokenCheckEnd
+bcc  TokenLoop		; Loop for next PROC/FN, Hex, LineNum character
+.TokenSpace
+bic  #&30,r2		; Clear PROC/FN, Hex flags
+br   TokenLoop
+
+.TokeniseNumber
+mov  r4,-(sp)		; Save output pointer
+jsr  pc,ReadLineNumberHere	; Read number to R3/R4, already skipped spaces
+mov  r4,r1		; R1=line number
+mov  (sp)+,r4		; Get output pointer back
+bcs  TokenNotNumber	; Not a valid line number, not a digit or too big
+mov  r1,r2
+movb #&8D,(r4)+		; Line number marker
+swab r2
+ror  r2
+ror  r2
+bic  #&FFCF,r2
+mov  r1,r0
+bic  #&FF3F,r0
+bis  r0,r2
+ror  r2
+ror  r2
+mov  #&14,r0
+xor  r0,r2
+mov  #3,r0
+swab r1
+br   TokenNumLp2
+.TokenNumLp1
+mov  r1,r2
+bic  #&FFC0,r2
+.TokenNumLp2
+bis  #&40,r2
+movb r2,(r4)+
+swab r1
+dec  r0
+bne  TokenNumLp1
+;mov  r4,r4		; Update output pointer
+mov  #8,r2		; Still expecting numbers
+sec			; CS=line number returned
+rts  pc
+.TokenNotNumber
+clc			; CC=no line number
+rts  pc
+
+; Search token table
+; ==================
+; On entry, R5=>input string to match
+;           R4=>dest
+;           R2= current flags
+;           R0= current char
+; On exit,  R5=>last char
+;           R4=unchanged
+;           R3 corrupted
+;           R2=old flags
+;           R1=new flags
+;           R0=token or character
+;           if token matched, R0=token, R5=>end of matched string, MI/EQ from new flags
+;           if not matched, R0=byte, R5=>current char, MI/EQ from current flags
+;           Caller doesn't check C/NC or other flags
+.TokenSearch
+#ifndef SLOWTOKEN
+ adr  TokenOffsets-2*ASC"A",r3
+ asl  r0
+ add  r0,r3		; r3=>offset for initial character
+ mov  (r3),r0
+ adr  TokenTable,r3
+ add  r0,r3		; r3=>start of tokens for this character
+#else
+ adr  TokenTable,r3	; r3=>start of token table
+#endif
+;
+.SearchTable
+mov  r5,r1		; Save source pointer
+.SearchLoop
+movb (r5),r0		; Get source character
+cmpb r0,(r3)		; Compare with token character
+beq  SearchMatch	; Match, check if full match
+cmp  r0,#ASC"."		; Abbreviation?
+beq  SearchDot		; Jump to match abbreviation
+.SearchNext
+inc  r3			; Step past this token
+movb (r3),r0
+bpl  SearchNext		; Loop until token byte
+inc  r3			; Step past token byte
+.SearchNextBack
+mov  r1,r5		; Restore source pointer
+inc  r3			; Step past flag to next token
+cmpb (r5),(r3)		; Do initial characters still match?
+#ifndef SLOWTOKEN
+ beq  SearchLoop 	; Yes, search next token
+#else
+ bcc  SearchLoop 	; Yes, search next token
+#endif
+movb (r5),r0		; Get first char back
+mov r2,r1		; new flags=old flags
+rts pc
+; R0=char, R1=old flag, R2=old flag, R3=corrupted, R4=preserved, R5=>current char
+; flags=set from token flags
+
+.SearchFound
+dec  r5			; Point to last character of source
+.SearchDot
+;inc  r3		; Step to end of token
+;movb (r3),r0
+movb (r3)+,r0		; Step to end of token
+bpl  SearchDot		; Loop until token byte fetched
+;inc  r3		; Step to flag byte
+movb (r3),r1		; Get new flags
+;sec			; Caller never checks C/NC
+rts pc
+; R0=token, R1=new flag, R2=old flag, R3=corrupted, R4=preserved, R5=>last char
+; flags=CS, flags set from token flag
+
+.SearchMatch
+inc  r5			; Step to next source char
+inc  r3			; Step to next token char
+;movb (r3),r0		; Get next byte
+tstb (r3)		; Test next byte
+bpl  SearchLoop		; Not a token, loop to check next character
+;inc  r3		; Point to flag
+;bitb #1,(r3)		; Needs nonalpha terminator?
+bitb #1,1(r3)		; Needs nonalpha terminator?
+beq  SearchFound	; No nonalpha needed, token matched
+movb (r5),r0		; Get following source character
+cmp  r0,#ASC"A"
+bcs  SearchFound	; <'A', matched
+cmp  r0,#ASC"Z"+1
+bcc  SearchFound	; >'Z', matched
+; copy source to dest
+
+; r4=>dest
+; r5=>last source char+1
+; r1=>first source char
+.SearchAlpha
+movb (r1)+,(r4)+
+cmp r1,r5
+bne SearchAlpha
+dec r4
+movb (r4),r0		; is this needed?
+dec r5
+mov r2,r1
+clc
+rts pc
+
+;.SearchFound
+;dec  r5			; Point to last character of source
+;movb (r3),r1		; Get new token flag
+;dec  r3			; Point to token byte
+;movb (r3),r0		; Get token byte
+;sec
+;rts pc
+; R0=token, R1=new flag, R5=last matched char
+; flags=CS
+
+; Print character or token
+; ========================
+; On entry, r0=character
+; On exit,  r0,r2 corrupted
+;
+.PrintR0TokenChar
+tstb r3			; Within a string?
+bne  PrintAscii		; Print via OSASCI
+.PrintR0Token
+tstb r0			; Is it a token?
+bpl  PrintAscii		; No, print via OSASCI
+mov  r1,-(sp)
+adr  TokenTable,r2
+.DetokeniseLp1
+mov  r2,r1		; Save start of this token string
+.DetokeniseLp2
+tstb (r2)+		; Loop to find b7=1
+bpl  DetokeniseLp2
+inc  r2			; Step past tokeniser flags
+cmpb r0,-2(r2)
+bne DetokeniseLp1	; No match, loop back
+.DetokeniseLp3
+movb (r1)+,r0
+bmi  DetokeniseDone	; Exit if b7 set
+jsr  pc,PrintR0		; Print character
+br   DetokeniseLp3
+.DetokeniseDone
+mov  (sp)+,r1
+rts  pc
+
+; Read line number
+; ================
+; On entry, r5=>start of number
+;
+.ReadLineNumber		; r5=>may be leading spaces
+jsr  pc,SkipSpaceThis
+;
+.ReadLineNumberHere
+; On entry, r5=>start of number
+;           r0= first character, not yet checked
+; On exit,  CS: not a line number
+;		r5=>unchanged, first character, not a digit
+;		r0= character at (R5)
+;	    CC: a line number
+;		r4=line number
+;		r5=>first non-digit character
+;		r0= character at (R5)
+jsr  pc,CheckDigit
+bcs  ReadLineNotNum2	; Not a decimal number
+mov  r5,-(sp)		; Save line pointer
+jsr  pc,EvalDecimalInt	; Read integer number to R3/R4, r5=>non-digit, r0=(R5)
+tst  r3
+sec
+bne  ReadLineNotNum1	; Number>65535
+cmp  #&FF00,r4		; SC if number>&FF00
+bcs  ReadLineNotNum1
+tst  (sp)+		; Drop saved line pointer, clear Carry
+rts  pc			; CC=valid line number
+.ReadLineNotNum1
+mov  (sp)+,r5		; Restore line pointer
+movb (r5),r0		; R0=character at (R5)
+.ReadLineNotNum2
+rts  pc			; CS=invalid line number
+
+; Find line in program
+; ====================
+; On entry, r4=line number
+; On exit,  r1=><cr> just before line to execute, to pass to r5
+;           CC+EQ, line found
+;           CC+NE, line not found
+;           MI+CS+NE, end of program
+; Corrupts  r0, r2
+;
+.LineFind
+mov  SV_PAGE,r1
+.LineFindLp
+movb 1(r1),r0		; Get line number high
+cmpb r0,#&FF
+beq  LineFindEnd	; End of program
+movb 2(r1),r2		; Get line number low
+swab r0
+bic  #&00FF,r0
+bic  #&FF00,r2
+bis  r2,r0		; r0=line number
+cmp  r0,r4		; Got to matching or higher line number?
+bcc  LineFindFound	; r1=><cr> before matching line
+movb 3(r1),r0
+bic  #&FF00,r0
+add  r0,r1		; Step to next line
+br   LineFindLp
+.LineFindEnd
+tst  r0			; NE
+sec
+.LineFindFound
+; If line found,        CC+EQ, r1=><cr> before matching line
+; If line not found,    CC+NE, r1=><cr> before next line
+; If end of program, MI+CS+NE, r1=><cr> before &FF end marker
+rts  pc
+
+; TokenFind - Look for a line starting with a token
+; =================================================
+; On entry, r0= token to look for, eg DEF, DATA
+;           r1=>current search point
+; On exit,  r1=>after matching token
+;           CC= Line not found
+;           CS= Line found
+.TokenFindLp1
+dec  r1			; Step back to current character
+.TokenFind
+cmpb (r1)+,#13		; Skip until <cr>
+bne  TokenFind
+cmpb (r1)+,#&FF
+beq  TokenFindEnd	; CC=End of program
+inc  r1			; Step past <linelo>
+.TokenFindLp2
+inc  r1			; Step past <len>
+cmpb (r1),#ASC" "
+beq  TokenFindLp2	; Skip any leading spaces
+cmpb (r1)+,r0		; Check if matching token
+bne  TokenFindLp1	; No match, skip this line
+sec			; CS=Line found
+.TokenFindEnd
+rts  pc
+

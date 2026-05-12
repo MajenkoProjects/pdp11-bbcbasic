@@ -1,0 +1,51 @@
+                                 PDP11 BBC BASIC Keymap
+                                 ======================
+Where it is possible to read function and editing keys, on non-Acorn systems they are
+returned using a regular keymapping. Where keypad keys can be read they will be returned
+as &100+x if read with ADVAL.
+
++===+=====+=====+===+====+===+====+====+====+=====+====+=====+=====+====+====+====+====+
+|   |  x0 |  x1 | x2| x3 | x4| x5 | x6 | x7 |  x8 | x9 |  xA |  xB | xC | xD | xE | xF |
++===+=====+=====+===+====+===+====+====+====+=====+====+=====+=====+====+====+====+====+
+|10x|     |     |   |    |   |    |    |    |     |    |     |     |   |KPentr|   |    |
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|12x|     |     |   |    |   |    |    |    |     |    | KP* | KP+ | KP,| KP-| KP.| KP/|
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|13x| KP0 | KP1 |KP2| KP3|KP4| KP5| KP6| KP7| KP8 | KP9|     |     |    |    |    |    |
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|18x|  F0 |  F1 | F2| F3 | F4| F5 | F6 | F7 |  F8 | F9 | F10 | F11 | F12| F13| F14| F15|
+|   | Prnt|     |   |    |   |    |    |    |     |    |     |     |    | Num| Scr| Brk|
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|19x| sF0 | sF1 |sF2|sF3 |sF4|sF5 | sF6| sF7| sF8 | sF9| sF10| sF11|sF12|sF13|sF14|sF15|
+|   |sPrnt|     |   |    |   |    |    |    |     |    |     |     |    |sNum|sScr|sBrk|
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|1Ax| cF0 | cF1 |cF2|cF3 |cF4|cF5 | cF6| cF7| cF8 | cF9| cF10| cF11|cF12|cF13|cF14|cF15|
+|   |cPrnt|     |   |    |   |    |    |    |     |    |     |     |    |cNum|cScr|cBrk|
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|1Bx| aF0 | aF1 |aF2|aF3 |aF4|aF5 | aF6| aF7| aF8 | aF9| aF10| aF11|aF12|aF13|aF14|aF15|
+|   |aPrnt|     |   |    |   |    |    |    |     |    |     |     |    |aNum|aScr|aBrk|
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|1Cx| WinL| Menu|   |    |   |    | Ins| Del| Home| End| PgDn| PgUp| <- | -> | Dn | Up |
+|   |sWinR|     |   |    |   |    |    |    |     |    |     |     |    |    |    |    |
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|1Dx|sWinL|sMenu|   |    |   |sTAB|sIns|sDel|sHome|sEnd|sPgDn|sPgUp| s<-| s->| sDn| sUp|
+|   | WinR|     |   |    |   |    |    |    |     |    |     |     |    |    |    |    |
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|1Ex|cWinL|cMenu|   |    |   |cTAB|cIns|cDel|cHome|cEnd|cPgDn|cPgUp| c<-| c->| cDn| cUp|
+|   |aWinR|     |   |    |   |    |    |    |     |    |     |     |    |    |    |    |
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+|1Fx|aWinL|aMenu|   |    |   |aTAB|aIns|aDel|aHome|aEnd|aPgDn|aPgUp| a<-| a->| aDn| aUp|
+|   |cWinR|     |   |    |   |    |    |    |     |    |     |     |    |    |    |    |
++---+-----+-----+---+----+---+----+----+----+-----+----+-----+-----+----+----+----+----+
+
+INKEY and GET return an 8-bit value, ADVAL(127) returns a 16-bit value &100+key.
+
+Whether particular keypresses are passed to BASIC depends on the particular platform. In
+particular, some systems don't return distinct values for shift or ctrl pressed with a
+key. For example, on some systems Shift-f1 onwards returns f11 onwards. This results in
+the extension of the function keys from f11 onwards being duplicated as Shift-f1 onwards:
+
+    +-----+-----+-----+-----+ +-----+-----+-----+-----+ +-----+-----+-----+-----+ +-----+-----+-----+
+key | f1  | f2  | f3  | f4  | | f5  | f6  | f7  | f8  | | f9  | f10 | f11 | f12 | |Print|Scrl |Break|
+sft | f11 | f12 |Print|Scrl | |Break| Win | Menu|Japan| |Japan|Japan| f11 | f12 | |Print|Scrl |Break|
+    +-----+-----+-----+-----+ +-----+-----+-----+-----+ +-----+-----+-----+-----+ +-----+-----+-----+

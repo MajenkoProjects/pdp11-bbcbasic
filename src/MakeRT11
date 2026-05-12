@@ -1,0 +1,15 @@
+; > MakeRT11
+; BBC BASIC for the PDP11 running RT11
+; (C)J.G.Harston 1988-2024
+
+OSNAME$: EQU "RT11"		; Target platform
+KBDEMT:  EQU 224		; KBD read with EMT 224
+#define NODIV			; Don't use DIV instruction
+#include "Version"		; Version settings
+#include "RT11Hdr"		; RT11 host header
+#include "MakeMain"		; Main BASIC code
+#include "CommonIO"		; Common non-Tube I/O interface code
+#include "AnsiKBD"		; ANSI keyboard parsing
+#include "RT11IO"		; Interface to RT11 host I/O system
+#include "SysVars"		; System variables and data buffers
+

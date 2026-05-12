@@ -1,0 +1,27 @@
+; > MakeMain
+; BBC BASIC for the PDP11
+; (C)J.G.Harston 1988-2022
+
+; Global "insert" file
+;
+; Version			; Version information
+; Header			; Host-specific header
+#include "Startup"		; Program header, startup, immediate mode, etc.
+#include "TokenEqus"		; Token values
+#include "Tokens"		; Token table, errors, tokeniser, detokeniser
+#include "GeneralIO"
+#include "Execute"		; Program execution dispatch loop
+#include "Commands"		; BASIC program commands
+#include "Assembler"
+#include "Evaluate"		; Expression evaluator
+#include "Stack"		; BASIC stack manipulation
+#include "Functions"		; BASIC program functions
+#include "TrigLog"
+#include "Variables"
+#include "Interface"
+#ifdef DEBUG
+#include <Debug>
+#endif
+; HostIO			; Host-specific I/O
+; SysVars			; Workspace
+

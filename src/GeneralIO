@@ -1,0 +1,81 @@
+; > GeneralIO
+; General I/O routines
+; 31-Aug-2015 v0.21a: cmdREPORT moved here to drop into PrintR1.
+; 04-Jul-2018 v0.27:  IO_ReadLine uses stack for control block.
+
+
+; Print inline text
+; =================
+; Corrupts r0,r1
+;
+.PrintInline		; Print inline text
+mov  (sp)+,r1		; Get return address to r1
+jsr  pc,PrintR1		; Print text at r1, corrupts r0,r2
+inc  r1			; increment return address
+bic  #1,r1		; clear bit zero
+mov  r1,pc		; jump to return address
+
+; REPORT - Display current error message
+; ======================================
+.cmdREPORT
+jsr  pc,IO_NEWL		; Print newline
+mov  SV_FAULT,r1	; Get current error block
+inc  r1			; Step past error number
+;			; Continue to print via token expansion
+
+; Print text at R1
+; ================
+; On entry, R1=>zero-terminated string
+;
+.PrintR1		; Print text pointed to by R1, term. by &00
+movb (r1)+,r0		; Get byte from r1, inc r1
+beq  PrintR1End		; Exit if final byte
+jsr  pc,PrintR0Token	; Print expandable character
+br   PrintR1		; Loop back
+
+; Print character, checking COUNT and WIDTH
+; =========================================
+; Preserves all registers, returns r0=13 if automatic NEWLINE output
+;
+.PrintAscii
+jsr  pc,IO_ASCI		; Output character
+br   PrintR0Check
+.PrintR0
+jsr  pc,IO_WRCH		; Output character
+.PrintR0Check
+cmp  r0,#13
+beq  PrintR0Clear	; If <cr>, clear COUNT
+cmp  r0,#32
+bcs  PrintR0Ret		; Control codes, ignore count
+incb SV_COUNT		; Increment COUNT
+tstb SV_WIDTH		; Check WIDTH
+beq  PrintR0Ret		; WIDTH=0, ignore
+cmpb SV_WIDTH,SV_COUNT	; Has COUNT reached WIDTH?
+bne  PrintR0Ret		; No, exit
+jsr  pc,IO_NEWL		; Print newline
+.PrintR0Clear
+clrb SV_COUNT		; Set COUNT to zero
+.PrintR0Ret
+.PrintR1End
+rts  pc
+
+; Read line of text
+; =================
+; On entry, R1=>memory to read string to
+; On exit,  R2=length of string
+;           Other regs preserved
+;           If Escape state, Escape error generated
+;
+.IO_ReadLine
+mov  #&00FF,-(sp)	; Highest character, padding
+mov  #&20FF,-(sp)	; Max line length, lowest character
+mov  r1,-(sp)		; Address of text buffer
+mov  sp,r1		; R1=>control block
+clr  r0
+jsr  pc,IO_WORD		; OSWORD 0 - read a line of text
+bcc  IO_ReadLineOk
+jmp  errEscape
+.IO_ReadLineOk
+add  #6,sp		; Drop control block from stack
+br   PrintR0Clear	; Zero COUNT, and clear Carry flag
+

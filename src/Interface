@@ -1,0 +1,873 @@
+; > Interface
+; Interface to host system
+; IO commands/functions/queries/etc
+
+; Done, tested:
+; CLS, CLG, COLOUR, MODE, =MODE, =POS, =VPOS, OSCLI, DRAW, MOVE, PLOT, GCOL, VDU
+; =POINT, =VDU, TIME=, TIME$=, =TIME, =TIME$, SOUND ON|OFF, =TIME$ checks for null return
+; GET$#chn, BPUT#chn,s$, GCOL c, COLOUR l,[p|r,g,b], PLOT x,y, SOUND, ENVELOPE, LOAD s$,n
+; 09-Mar-2009 LoadProgram can load and tokenise text file
+; 24-Jun-2010 SAVE name$,start,end[,exec[,load]]
+; 02-Jul-2010 QUIT [retval]
+; 16-Aug-2013 TextLoad calls LineTokeniser and LineInsert
+; 07-Dec-2013 SAVE <cr> saves with inline filename
+; 16-Aug-2015 v0.20a VDU(n) returns 8-bit value
+; 26-Aug-2015 v0.20b Optimised some common OSBYTE-calling code
+; 14-Jul-2017        Optimised TextLoad with modified Tokeniser API
+; 04-Jul-2018 v0.27 Optimised various I/O calls by using token in R0
+;                   Merged a lot of common code in OSBYTE calls and some OSWRCH calls
+; 15-Apr-2020 Optimised POINT by using stack for control block
+; 18-Mar-2024 LOAD/SAVE checks for end-of-statement if immediate command, tweeked
+;                   textload and FindTOP.
+
+
+; On entry to command subroutines,
+;  r5=>character after command token, no spaces skipped
+;  r0=(token-&C6)*2
+;  r1=dispatch address
+;
+; On entry to function subroutines,
+;  r5=>character after function token, no spaces skipped
+;  r0=function token
+;  r1=dispatch address
+;
+; On exit from function subroutines,
+;  r4=b0-b15 or string start
+;  r3=b16-b31 or string length
+;  r2=type with flags set
+
+
+; VDU Commands
+; ============
+
+; CLS - Clear Text Window
+; =======================
+.cmdCLS
+clrb SV_COUNT
+mov  #36,r0	; R0=12+24
+
+; CLG - Clear graphics window
+; ===========================
+.cmdCLG
+sub  #24,r0	; R0=16 or 12
+jmp  IO_WRCH
+
+; DRAW x,y - Send DRAW command, entered with R0=&32
+; MOVE x,y - Send MOVE command, entered with R0=&4C
+; =================================================
+.cmdDRAW
+mov  #5,r0		; DRAW is PLOT 5
+.cmdMOVE
+bic  #&FFF8,r0		; MOVE is PLOT 4
+mov  r0,-(sp)
+jsr pc,EvalInteger
+mov r4,-(sp)		; Save X coord
+br  cmdPLOTetc
+
+; PLOT [k,]x,y - Send PLOT command
+; ================================
+.cmdPLOT
+mov #69,-(sp)		; PLOT is PLOT 69
+jsr pc,EvalInteger
+mov r4,-(sp)		; Save X coord or PLOT command
+jsr pc,EvalComma	; Get Y coord or X coord
+jsr pc,CheckEndStatement
+beq cmdPLOTxy		; Jump to do PLOT 69,x,y
+mov (sp),2(sp)		; Move first param to command
+mov r4,(sp)		; Save second param as X coord
+.cmdPLOTetc
+jsr pc,EvalComma	; Get Y coord
+.cmdPLOTxy
+mov #25,r0
+jsr pc,IO_WRCH		; PLOT
+mov (sp)+,r3		; R3=X coord
+mov (sp)+,r0		; R0=command
+jsr pc,IO_WRCH		; k
+mov r3,r0
+jsr pc,WrchWord		; X low byte, high byte
+mov r4,r0		; Y low byte, high byte
+.WrchWord
+jsr pc,IO_WRCH		; low byte
+swab r0
+jmp IO_WRCH		; high byte
+
+; MODE m - Set screen mode
+; ========================
+.cmdMODE
+jsr pc,EvalInteger
+clrb SV_COUNT
+mov #22,r3
+br  WrchR3R4
+
+; GCOL [a,]c - Set graphics colour
+; ================================
+.cmdGCOL
+clr -(sp)		; Prepare for GCOL c
+jsr pc,EvalInteger
+jsr pc,CheckEndStatement
+beq cmdGCOL2
+mov r4,(sp)		; Overwrite action on stack
+jsr pc,EvalComma
+.cmdGCOL2
+mov (sp)+,r3		; r3=action, r4=colour
+mov #18,r0
+jsr pc,IO_WRCH
+.WrchR3R4
+mov r3,r0
+jsr pc,IO_WRCH
+.WrchR4
+mov r4,r0
+jmp IO_WRCH
+
+; COLOUR l[,p|,r,g,b] - Set text or palette colour
+; =================================================
+.cmdCOLOUR
+jsr pc,EvalInteger
+mov #17,r3
+jsr pc,CheckEndStatement
+beq WrchR3R4		; Jump with COLOUR l
+mov r4,-(sp)		; Save logical colour
+jsr pc,EvalComma	; Get p or r
+mov r4,r1		; R1=P
+clr r2			; R2=R=0
+clr r3			; R3=G=0
+clr r4			; R4=B=0
+jsr pc,CheckEndStatement
+beq cmdCOLOURrgb	; Jump to do COLOUR l,p with VDU 19,l,p,0,0,0
+mov r1,-(sp)		; Save R, SP=>R,L
+jsr pc,EvalComma
+mov r4,-(sp)		; Save G, SP=>G,R,L
+jsr pc,EvalComma	; R4=B, SP=>G,R,L
+mov (sp)+,r3		; R3=G
+mov (sp)+,r2		; R2=R
+mov #16,r1		; R1=P=16 for screen colour
+tst (sp)		; Test logical colour
+bpl cmdCOLOURrgb	; L>=0 - set screen colour
+mov #24,r1		; R1=P=24 for border colour
+;
+.cmdCOLOURrgb
+; (sp)=LOGICAL, R1=PHYSICAL, R2=RED, R3=GREEN, R4=BLUE
+mov (sp)+,r0		; Get logical colour
+swab r0			; Move to top byte
+bic #&00FF,r0
+bis #&0013,r0		; Make bottom byte=19
+jsr pc,WrchWord		; VDU 19,L
+mov r1,r0
+jsr pc,IO_WRCH		; VDU 19,L,P
+mov r2,r0
+jsr pc,IO_WRCH		; VDU 19,L,P,R
+br  WrchR3R4		; VDU 19,L,P,R,G,B
+
+; VDU n[,|;[n]] - Send to VDU stream
+; ==================================
+.cmdVDUsemi
+mov r4,r0
+swab r0
+jsr pc,IO_WRCH		; Send top byte
+.cmdVDU
+jsr pc,CheckEndStatement
+beq cmdVDUexit		; End of statement, exit
+jsr pc,EvalInteger
+jsr pc,WrchR4		; Send low byte to output
+;jsr pc,SkipSpaceThis ; Next
+;inc r5			; Step past comma, semi or bar
+jsr pc,SkipSpaceNext
+cmp r0,#ASC","
+beq cmdVDU		; Loop back if comma
+cmp r0,#&3B		; Semicolon
+beq cmdVDUsemi		; Loop back to send high byte for semi
+mov #9,r1		; Prepare to send 9 zeros
+cmp r0,#ASC"|"
+beq cmdOFFzero		; Jump to send zeros if bar
+dec r5			; Point back to current character
+.cmdVDUexit
+rts pc
+
+; OFF - turn cursor off
+; ON - turn cursor on
+; =====================
+; OFF entered with R0=&7E
+.cmdONvdu
+mov #1,r0		; ON is VDU 23,1,1,...
+.cmdOFF
+bic #-2,r0		; OFF is VDU 23,1,0,...
+mov r0,r4
+;mov r0,r1
+mov #&0117,r0
+jsr pc,WrchWord		; VDU 23,1
+;mov r1,r0
+;jsr pc,IO_WRCH		; Send ON/OFF byte
+jsr pc,WrchR4		; Send ON/OFF byte
+mov #7,r1		; Finish VDU sequence with 7 NULLs
+.cmdOFFzero
+clr r0
+.cmdOFFlp
+jsr pc,IO_WRCH
+dec r1
+bne cmdOFFlp
+rts pc
+
+
+; Character Input Functions
+; =========================
+
+; =POINT(x,y) - read colour at point
+; ==================================
+.fnPOINT
+jsr  pc,EvalInteger	; Get X parameter
+mov  #-1,-(sp)		; Stack default result
+mov  r4,-(sp)		; Put X on the stack
+jsr  pc,EvalComma	; Step past ',', get Y parameter
+jsr  pc,CheckClose	; Step past ')'
+mov  (sp),-(sp)		; Copy X lower down on stack
+mov  r4,2(sp)		; Put Y on stack
+mov  sp,r1		; r1=>control block on stack
+mov  #9,r0
+jsr  pc,IO_WORD		; OSWORD 9 - call POINT routine
+cmp  (sp)+,(sp)+	; Drop X and Y from stack
+mov  (sp)+,r4		; Get pixel value from stack
+br   fnReturnExtendR4	; Return value, extending &xx80+x to &FFFFFF80+x
+
+; =GET$[#chn] - wait for character from input or string from channel
+; ==================================================================
+; Also =GET$(x,y) - read char from screen
+.fnGETs
+CMPB (R5),#ASC"#"
+BNE  fnGETrdch
+JSR  PC,EvalHashVal	; Get channel number
+MOV  R4,R1		; R1=channel
+ADR  SV_STRING,R4	; Point to string buffer
+CLR  R3			; String length=0
+.fnGETlp
+JSR  PC,IO_BGET
+BCS  fnGETend		; End of file
+CMP  R0,#10
+BEQ  fnGETend		; LF - end of line
+CMP  R0,#13
+BEQ  fnGETend		; CR - end of line
+MOVB R0,(R4)+		; Store in string buffer
+INC  R3
+CMP  R3,#255
+BCS  fnGETlp		; Loop for up to 255 characters
+.fnGETend
+ADR  SV_STRING,R4	; R4=string start, R3=length
+MOV  #&8000,R2		; R2=string
+RTS  PC
+
+.fnGETrdch
+JSR  PC,IO_RDCH		; Wait for key
+MOV  #1,R3		; R3=string length
+.fnReadChar
+ADR  SV_STRING,R4	; R4=>string buffer
+MOV  R0,(R4)		; Put character into buffer
+MOV  #&8000,R2		; R2=string type
+RTS  PC
+
+; =INKEY$ time - wait specified time for character
+; ================================================
+.fnINKEYs
+JSR  PC,fnINKEY		; call INKEY routine
+MOV  R4,R0		; Move result to R0
+INC  R3			; Change -1/0 to 0/1
+BR   fnReadChar		; Jump to store 0 or 1 characters
+
+; =INKEY time - wait specified time for character
+; ===============================================
+.fnINKEY
+mov  #&81,r0
+jsr  pc,CallOsbyte16	; Make OSBYTE call
+tst  r4
+.fnReturnExtend
+sxt  r3			; Sign extend into r3
+clr  r2			; Type=Integer
+rts  pc
+
+; =MODE - read current screen mode
+; ================================
+.fnMODE
+jsr  pc,fnMODEcall
+.fnReturnExtendR4
+movb r4,r4
+br   fnReturnExtend
+
+; =ADVAL device - read device status
+; ==================================
+.fnADVAL
+mov  #&80,r0		; R0=ADVAL
+;
+.CallOsbyte16
+mov  r0,-(sp)		; Save OSBYTE function
+jsr  pc,EvalIntVal	; Evaluate parameter
+mov  r4,r1		; R1=<b15-b8><b7-b0> of parameter
+mov  r4,r2
+swab r2			; R2=<b7-b0><b15-b8> of parameter
+bic  #&FF00,r2		; R2=<00000><b15-b8> of parameter
+mov  (sp)+,r0		; Get OSBYTE function back
+jsr  pc,IO_BYTE		; Make the OSBYTE call, returns:
+;			; R1= <b15-b8><b7-b0> of result
+;			; R2=<b23-b16><b15-b8> of result
+mov  r1,r4		; Get b0-b15 from R1
+br   fnReturnR4		; Return 16-bit result
+
+; =VDU n - read VDU variable
+; ==========================
+.fnVDU
+mov  #&A0,r0
+jsr  pc,CallOsbyte16	; Returns flags from R4
+br   fnReturn8bitR1	; Reduce to 8-bit result
+
+; =POS - read horizontal cursor position
+; ======================================
+.fnPOS
+jsr  pc,fnVPOS		; Read POS and VPOS
+.fnReturn8bitR1
+mov  r1,r0
+br   fnReturn8bitR0
+
+; =VPOS - read vertical cursor position
+; =====================================
+.fnVPOS
+mov  #&86+&64,r0	; R0=&86 for =VPOS
+.fnMODEcall
+sub  #&64,r0		; R0=&87 for =MODE
+clr  r1			; Prepare R1=0 for default, R2 already 0
+jsr  pc,IO_BYTE
+mov  r2,r0
+br   fnReturn8bitR0
+
+; =GET - wait for character from input
+; ====================================
+; Also =GET(port), =GET(x,y) - read char from screen
+.fnGET
+JSR  pc,IO_RDCH		; Wait for key
+.fnReturn8bitR0
+bic  #&FF00,r0
+.fnReturnR0
+mov  r0,r4		; R4=returned result from R0
+.fnReturnR4
+clr  r3			; R3=b16-b31=0
+clr  r2			; R2=integer type
+rts  pc
+
+
+; Time Commands and Functions
+; ===========================
+
+; TIME=val, TIME$=s$ - set TIME or TIME$
+; ======================================
+.cmdTIME
+cmpb (r5),#ASC"$"	; Check for '$'
+beq cmdTIMEs		; TIME$
+;
+jsr pc,EvalEqual	; Step past '=', get integer
+clr -(sp)		; Use control block on stack
+mov r3,-(sp)		; Stack value to write
+mov r4,-(sp)
+mov sp,r1		; R1=>control block
+mov #2,r0		; R0=2 - write TIME
+jsr pc,IO_WORD
+add #6,sp		; Drop control block
+rts pc
+;
+.cmdTIMEs
+inc  r5			; Step past '$'
+jsr  pc,CheckEqual	; Check for '='
+jsr  pc,EvalString	; Get string
+jsr  pc,EvalStoreCRString	; Copy to string buffer
+dec  r4			; R4=>byte before the string
+dec  r3			; R3=string length minus <cr>
+movb r3,(r4)		; Store string length
+mov  r4,r1		; R4=>control block
+mov  #15,r0		; TIME$ is OSWORD 15
+jmp  IO_WORD		; Set TIME$
+
+; =TIME, =TIME$ - read TIME or TIME$
+; ==================================
+.fnTIME
+cmpb (r5),#ASC"$"
+beq fnTIMEs		; =TIME$
+;
+sub #6,sp		; Use control block on stack
+mov sp,r1		; R1=>control block
+mov #1,r0		; R0=1 - read TIME
+jsr pc,IO_WORD
+br  fnReturnArgs	; Pop from stack and return
+;
+.fnTIMEs
+inc r5			; Step past '$'
+adr SV_STRING,r1	; Point to control block
+clr (r1)		; Read time as string
+mov #14,r0
+jsr pc,IO_WORD		; Read TIME$
+adr SV_STRING,r4	; Start=SV_STRING
+mov (r4),r3		; Check returned string
+beq fnTIMEnull		; Still zero, nothing returned
+mov #24,r3		; Length=24
+.fnTIMEnull
+mov #&8000,r2		; Type=String
+rts pc
+
+
+; File Functions
+; ==============
+
+; =EOF#chn - read end-of-file status
+; ==================================
+.fnEOF
+jsr pc,EvalHashVal	; Step past '#', get handle
+mov r4,r1
+mov #127,r0		; OSBYTE 127,channel to read EOF
+jsr pc,IO_BYTE
+clr r4			; Prepare R4=0
+cmp #1,r1		; If R1=0, Cy=0  if R1>0, Cy=1
+sbc r4			;    R4=0-0=0    R4=0-1=FFFF
+br  fnReturnExtend	; Return 32-bit sign extended value
+
+; =BGET#chn - read byte from channel
+; ==================================
+.fnBGET
+jsr pc,EvalHashVal	; Step past '#', get integer handle
+mov r4,r1		; R1=handle
+jsr pc,IO_BGET		; Call MOS to read on this channel
+br  fnReturn8bitR0
+
+; OSCLI - Execute command
+; =======================
+#ifdef NOEXTRAFN
+ .cmdOSCLI
+ jsr pc,EvalStringCR
+ mov r4,r0
+ jmp IO_CLI
+#else
+ .cmdOSCLI
+ jsr pc,EvalStringCR
+ br  fnOSCLI2
+ .fnOSCLI
+ jsr pc,EvalStrValCR
+ .fnOSCLI2
+ mov r4,r0
+ jsr pc,IO_CLI
+ br  fnReturnR0
+#endif
+
+; =OPEN(IN|OUT|UP) f$ - open file
+; ===============================
+; On entry, R0=AD - OPENUP
+;           R0=AE - OPENOUT
+;           R0=8E - OPENIN
+.fnOPENUP
+mov #&CE,r0
+.fnOPENIN
+.fnOPENOUT
+asl r0			; R0=11C,15C,19C
+sub #&DC,r0		; R0=40,80,C0
+mov r0,-(sp)		; Save OPEN function
+jsr pc,EvalStrValCR	; Get cr-string
+mov r4,r1		; r1=>filename
+mov (sp)+,r0		; r0=function
+jsr pc,IO_FIND
+br  fnReturnR0
+
+; Open file information
+; =====================
+
+; =PTR#chn - Read file pointer
+; =EXT#chn - read file extent
+; PTR#chn=val - Set file pointer
+; EXT#chn=val - Set file extent
+; =============================
+; On entry, R0=8F - =PTR
+;           R0=12 - PTR=
+;           R0=A2 - =EXT
+;           R0=86 - EXT=
+.cmdPTR
+clr r0			; Becomes R0=1 for =PTR
+.cmdEXT
+.fnPTR
+inc r0			; Becomes R0=7 for EXT=, R0=0 for =PTR
+.fnEXT
+bic #&FFFC,r0		; Reduce to OSARGS action 0-3
+mov r0,-(sp)		; Save OSARGS action
+jsr pc,EvalHashVal	; Step past '#', get integer handle
+mov (sp),r0		; Get OSARGS action
+mov r4,-(sp)		; Save handle
+asr r0			; Check bit 0 of action, read/write
+bcc callARGS2		; b0=0, read function
+jsr pc,EvalEqual	; Step past '=', get integer
+.callARGS2
+mov (sp)+,r1		; R1=handle
+mov (sp),r0		; R0=function, leave on stack as padding
+mov r3,-(sp)		; sp=>data word
+mov r4,-(sp)
+mov sp,r2		; R2=>data word
+jsr pc,IO_ARGS		; Make the OSARGS call
+.fnReturnArgs
+mov (sp)+,r4		; R3/R3=returned data word
+mov (sp)+,r3
+tst (sp)+		; Drop padding/byte 5
+clr r2			; R2=integer
+.cmdBPUTend
+rts pc
+
+
+; File Commands
+; =============
+
+; CLOSE#chn - Close channel
+; =========================
+.cmdCLOSE
+jsr pc,EvalHashVal	; Step past '#', get integer
+mov r4,r1		; Pass handle to R1
+clr r0
+jmp IO_FIND
+
+; BPUT#chn,[byte|string(;)] - Write byte or string to channel
+; ===========================================================
+.cmdBPUT
+jsr pc,EvalHashVal	; Step past '#', get integer handle
+mov r4,-(sp)		; Save handle
+jsr pc,CheckComma	; Step past ','
+jsr pc,Evaluate		; Get data to send
+bmi cmdBPUTs		; Send string
+jsr pc,EnsureInteger	; Convert float
+mov (sp)+,r1		; Get handle to R1
+mov r4,r0		; Move byte to R0
+jmp IO_BPUT		; Call MOS to write byte
+
+.cmdBPUTs
+mov (sp)+,r1		; Get handle to R1
+tst r3
+beq cmdBPUTzero		; Zero-length string
+.cmdBPUTlp
+movb (r4)+,r0
+jsr pc,IO_BPUT		; Send character
+dec r3
+bne cmdBPUTlp		; Loop until all sent
+.cmdBPUTzero
+;jsr pc,SkipSpaceThis ; Next
+;inc r5			; Step past ';'
+jsr pc,SkipSpaceNext
+cmp r0,#&3B		; Terminating ';'?
+beq cmdBPUTend		; Don't output end-of-line
+dec r5			; No ';', step back again
+mov #10,r0
+jmp IO_BPUT		; Write line-feed terminator
+
+; QUIT [num] - Quit interpreter
+; =============================
+.cmdQUIT
+clr r4			; Prepare to use zero as return value
+inc r5			; Step past double token
+jsr pc,CheckEndStatement
+;jsr pc,FetchNextChar	; Step past second token byte
+;jsr pc,CheckEndToken
+beq cmdQUIT2		; End of statement, use zero
+jsr pc,EvalInteger	; Get return value
+.cmdQUIT2
+mov r4,r0		; Pass to R0
+jmp IO_QUIT
+
+; LOAD str$[,addr] - Load program/data
+; ====================================
+; Fetch CR-string parameter
+; Call LoadProgram (finding TOP)
+; Jump to Immediate mode
+.cmdLOAD
+cmpb (r5),#tknQUIT
+beq  cmdQUIT		; C898 - QUIT
+; cmpb r0,#tknSYS
+; beq  cmdSYS		; C899 - SYS
+jsr pc,EvalStringCR	; Get filename to R4
+#ifdef FILEEXTN
+ jsr pc,SkipSpaceNext
+ cmp r0,#ASC","
+ beq cmdLoadData
+ dec r5
+#endif
+jsr pc,EnsureEndStatement
+jsr pc,LoadProgram	; Load program, check TOP
+jmp ImmediateClear	; Clear heap, drop to immediate mode
+
+#ifdef FILEEXTN
+ ; LOAD str$,addr - load data
+ ; --------------------------
+ .cmdLoadData
+ jsr pc,StackStringAndOp
+ jsr pc,EvalInteger
+ mov r4,FILE_LOAD+0
+ mov r3,FILE_LOAD+2
+ jsr pc,UnstackStringDropOp
+ br  LoadData
+#endif
+
+; Load program named at R4 to memory at R1
+; ----------------------------------------
+.LoadProgFile
+mov  r1,FILE_LOAD+0	; Address to load to
+mov  #&82,r0
+jsr  pc,IO_BYTE
+mov  r1,FILE_LOAD+2	; High word of address
+
+; Load data named at R4 to address in FILE_LOAD
+; ---------------------------------------------
+.LoadData
+mov  #255,r0		; r0=&FF - LOAD
+clr  FILE_EXEC		; Load to specified address
+.FileData
+mov  r4,FILE_NAME	; Point to filename
+adr  FILE_NAME,r1	; r1=>control block
+jmp  IO_FILE		; Perform file action
+
+; Load program named at R4
+; ------------------------
+.LoadProgram
+mov  SV_PAGE,r1
+jsr  pc,LoadProgFile
+mov  SV_PAGE,r1
+;movb (r1),r0
+;cmpb r0,#13
+cmpb (r1),#13
+beq  FindTopLp		; Starts with <cr>, assume 6502 BASIC
+; Should also check for Z80/8086 BASIC
+;
+; Check for loaded text and tokenise
+; ----------------------------------
+; Need to reload higher up in memory to prevent overwriting itself
+mov  r4,FILE_NAME	; Don't rely on being preserved
+mov  #5,r0
+adr  FILE_NAME,r1
+jsr  pc,IO_FILE		; Get file length, can't depend on return from OSFILE_LOAD
+mov  FILE_LENGTH,r0	; If OSFILE 5 not implemented, will use length left by initial LOAD
+; Load text file to PAGE+256
+mov  SV_PAGE,r1
+add  #256,r1
+;
+; Load text file to SP-length-256
+;mov  sp,r1
+;sub  r0,r1		; r1=stack-length
+;sub  #256,r1		; r1=stack-length-256
+;bic  #1,r1		; Ensure even address
+;
+mov  r0,-(sp)		; Save length
+mov  r1,-(sp)		; Save start
+jsr  pc,LoadProgFile	; Load program file
+mov  (sp)+,r5		; Point to start of loaded text source
+mov  (sp)+,r0		; Get length
+mov  SV_PAGE,-(sp)	; Stack start of dest
+add  r5,r0		; Point to end of loaded data
+clrb (r0)		; Put zero terminator after loaded text
+clr  SV_LINE		; Start at line zero before incrementing
+mov  (r5),r0		; Get first two characters
+cmp  r0,#ASC"#"+256*ASC"!"  ; Program starts with #!
+bne  LoadText
+.LoadTextSkip
+movb (r5)+,r0		; Skip past first line
+cmp  r0,#32
+bcc  LoadTextSkip
+.LoadText
+add  #10,SV_LINE	; Step to next line number
+.LoadTextNext
+; r5=>source
+; (sp)=>dest
+tstb (r5)		; r5=>source text
+beq  LoadTextEnd	; End of source text
+jsr  pc,TokeniseLine
+;
+; R5=>after end of untokenised line
+; R4=>start of tokenised line
+; R3= length of tokenised line excluding <cr>
+; R2= linenum
+;
+tst  r3			; Check tokenised line length
+beq  LoadTextNext	; Zero-length line, skip to next
+add  #4,r3		; r3=BASIC line length
+mov  (sp)+,r1		; r1=>insertion point
+movb #13,(r1)+		; Insert <cr>
+mov  r5,-(sp)
+mov  r4,r5		; R5=tokenised source
+mov  r2,r4		; R4=linenum
+jsr  pc,InsertLine	; Insert the tokenised line
+mov  (sp)+,r5
+dec  r1			; Point dest to <cr>
+mov  r1,-(sp)		; Restack dest for next line
+br   LoadText		; Loop for another line
+.LoadTextEnd
+mov  (sp)+,r1		; Get insertion point back
+movb #13,(r1)+		; Put final <cr> in
+movb #&FF,(r1)		; Put terminator in place
+;
+; Check program consistancy, set TOP, return R1=TOP, R0=corrupted
+; ---------------------------------------------------------------
+.FindTOP
+mov  SV_PAGE,r1		; Start at PAGE
+.FindTopLp
+mov  r1,r0		; r0=>start of this line
+cmpb (r1)+,#13
+bne  BadProgram
+cmpb (r1)+,#&FF
+beq  FindTopFound
+inc  r1			; Step past line number
+movb (r1),r1		; Get length byte
+bic  #&FF00,r1		; Ensure 8-bit value
+cmp  r1,#4
+bcs  BadProgram		; If len<4, invalid
+add  r0,r1		; Point to next CR
+br   FindTopLp		; Loop to check next line
+;bcc  FindTopLp		; Loop if not past end of memory
+.BadProgram
+jsr  pc,PrintInline
+equs "Bad program",13,0
+align
+jmp  ImmediateClearStop
+.FindTopFound
+mov  r1,SV_TOP		; r1=>byte after end of program
+rts  pc
+
+; SAVE str$[,start,end[,exec[,load]] - Save program/data
+; ======================================================
+.cmdSAVE
+jsr  pc,CheckEndStatement
+bne  cmdSAVE1		; Not SAVE<cr>
+mov  r5,-(sp)		; Save LPTR
+mov  SV_PAGE,r5
+inc  r5
+cmpb (r5)+,#&FF
+bcc  cmdSAVE0		; Null program
+inc r5
+jsr  pc,FetchNextChar
+cmpb r0,#tknREM
+bne  cmdSAVE0		; First line not REM
+jsr  pc,FetchNextChar
+cmpb r0,#ASC">"
+bne  cmdSAVE0		; First line not REM >
+inc  r5
+mov  r5,r4		; Point to inline filename
+mov  (sp)+,r5		; Restore LPTR
+br   cmdSAVEprog	; Save program
+.cmdSAVE0
+mov (sp)+,r5		; Restore LPTR
+.cmdSAVE1
+jsr pc,EvalStringCR	; Get filename to R4
+#ifdef FILEEXTN
+ jsr pc,SkipSpaceNext
+ cmp r0,#ASC","
+ beq cmdSaveData
+ dec r5
+#endif
+jsr pc,EnsureEndStatement
+.cmdSAVEprog
+mov SV_PAGE,FILE_START+0
+mov SV_TOP,FILE_END+0
+mov #&82,r0
+jsr pc,IO_BYTE
+mov r1,FILE_START+2	; High word of address
+mov r1,FILE_END+2
+mov #&FB00,FILE_LOAD+0
+mov #&FFFF,FILE_LOAD+2
+clr FILE_EXEC+0
+clr FILE_EXEC+2
+clr r0
+jsr pc,FileData		; Perform OSFILE with R0=action, R4=>filename
+jmp ImmediateLoop
+
+#ifdef FILEEXTN
+ ; SAVE str$,start,end[,exec[,load]] - save data
+ ; ---------------------------------------------
+ .cmdSaveData
+ jsr pc,StackStringAndOp
+; inc r5			; Step past comma
+ jsr pc,EvalInteger
+ mov r3,-(sp)
+ mov r4,-(sp)		; Save start
+ jsr pc,EvalComma
+ mov r3,-(sp)
+ mov r4,-(sp)		; Save end
+ cmp r0,#ASC","
+ bne cmdSave2		; SAVE str$,start,end
+ inc r5
+ jsr pc,EvalInteger
+ mov r3,-(sp)
+ mov r4,-(sp)		; Save exec
+ cmp r0,#ASC","
+ bne cmdSave3		; SAVE str$,start,end,exec
+ inc r5
+ jsr pc,EvalInteger
+ br  cmdSave4
+ .cmdSave2		; sp=>end, start
+ mov 6(sp),-(sp)	; sp=>start.hi, end, start
+ mov 6(sp),-(sp)	; sp=>start, end, start
+ .cmdSave3		; sp=>exec, end, start
+ mov 8(sp),r4
+ mov 10(sp),r3		; r3/r4=load, sp=>exec, end, start
+ .cmdSave4		; r3/r4=load, sp=>exec, end, start
+ mov r4,FILE_LOAD+0
+ mov r3,FILE_LOAD+2
+ mov (sp)+,FILE_EXEC+0
+ mov (sp)+,FILE_EXEC+2
+ mov (sp)+,FILE_END+0
+ mov (sp)+,FILE_END+2
+ mov (sp)+,FILE_START+0
+ mov (sp)+,FILE_START+2
+ jsr pc,UnstackStringDropOp
+ clr r0			; OSFILE 0 - Save
+ jmp FileData		; Save data and return
+#endif
+
+
+; SOUND commands
+; ==============
+
+; ENVELOPE a,b,c,d,e,f,g,h,i,j,k,l,m,n
+; ====================================
+.cmdENVELOPE
+jsr  pc,EvalInteger	; Get first parameter
+adr  MOS_BUF,r1
+movb r4,(r1)+
+mov  #13,-(sp)		; Stack remaining number of parameters
+mov  r1,-(sp)		; Stack pointer to paramter block
+.cmdENVlp
+jsr  pc,EvalComma
+mov  (sp),r1		; Get pointer to parameter block
+movb r4,(r1)+		; Store parameter
+mov  r1,(sp)		; Save updated pointer
+dec  2(sp)		; Decrement number of remaining parameters
+bne  cmdENVlp
+mov  #8,r0		; R0=8 for ENVELOPE
+br   cmdSOUNDdo
+
+; SOUND [ON|OFF|c,a,p,d] - Issue SOUND command
+; ============================================
+.cmdSOUND
+;jsr  pc,SkipSpaceThis ; could be Next, swap inc for dec
+jsr  pc,SkipSpaceNext
+clr  r1			; SOUND ON is *FX210,0
+cmpb r0,#tknON
+beq  cmdSOUNDon		; Jump to do SOUND ON
+dec  r1			; SOUND OFF is *FX210,255
+cmpb r0,#tknOFF
+bne  cmdSOUND2		; Not SOUND OFF, jump past
+.cmdSOUNDon
+;inc  r5			; Step past ON/OFF
+mov  #210,r0
+clr  r2
+jmp  IO_BYTE
+.cmdSOUND2		; SOUND c,a,p,d
+dec  r5
+jsr  pc,EvalInteger	; Get first parameter
+adr  MOS_BUF,r1
+mov  r4,(r1)+
+mov  #3,-(sp)		; Stack remaining number of parameters
+mov  r1,-(sp)		; Stack pointer to parameter block
+.cmdSOUNDlp
+jsr  pc,EvalComma	; If this evaluation calls something that uses MOS_BUF,
+mov  (sp),r1		; MOS_BUF will get overwritten
+mov  r4,(r1)+		; Store in parameter block
+mov  r1,(sp)		; Save updated pointer
+dec  2(sp)		; Decrement number of remaining parameters
+bne  cmdSOUNDlp
+mov  #7,r0		; R0=7 for SOUND
+.cmdSOUNDdo
+cmp  (sp)+,(sp)+	; Drop pointer and count from stack
+adr  MOS_BUF,r1
+jmp  IO_WORD
+

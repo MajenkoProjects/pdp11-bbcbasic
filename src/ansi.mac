@@ -1,0 +1,505 @@
+; > ansi.mac
+; ANSI BBC VDU driver for PDP11 Unix
+; Implements BBC VDU text control codes
+;
+; 14-Sep-2015 v0.01 Initial version
+; 25-Dec-2015 v0.02 Optimised MOV #STDOUT,R0 and COLOUR
+; 20-Jun-2020 v0.03 COLOUR &C0+n filtered out, COLOUR &88+n sets ANSI bright background
+; 15-Jan-2022       CHR$127 jumps directly to vdu127.
+; 06-Aug-2022       Added build options for BSD stack API.
+; 15-Sep-2023 v0.04 Toggle VDU 10 between DOWN and NEWL.
+;
+; Notes:
+; Some platforms support seperate bright foreground and bright background
+; Some platforms only set both background and foreground bright
+; Some platforms only set foreground bright
+; User should set background before foreground to be most compatible, using:
+;   COLOUR &80+bg:COLOUR &00+fg
+
+
+VERSION:	EQU	&0004
+BUILD:		EQU	0
+
+ORG  0			; position independent code
+HOSTIO:	EQU 1		; HOSTIO=1 for Unix
+EQUW &0107		; magic number, also branch to Startup
+EQUW _DATA%-_TEXT%	; size of text
+EQUW _BSS%-_DATA%	; size of initialised data
+EQUW _END%-_BSS%	; size of uninitialised data
+EQUW &0000		; size of symbol data
+EQUW _ENTRY%-_TEXT%	; entry point (v7 only, must be zero for pre-v7)
+EQUW &0000		; not used
+EQUW &0001		; no relocation info
+ORG  0			; position independent code
+._TEXT%
+;
+
+._ENTRY%
+#ifndef BSD
+ TRAP 48		; signal()
+ EQUW 2			; SIGINT - User interupt (Escape)
+ EQUW 1			; SIGIGNORE - only terminate when read() ends
+#endif
+
+.loop
+#ifdef BSD
+ mov  #1,-(sp)		; 1 byte
+ mov  #charbuf,-(sp)	; data buffer
+ clr  -(sp)		; fd=STDIN
+ clr  -(sp)		; padding
+ TRAP 3			; SYS read
+ rol  r0		; Save Carry flag
+ add  #8,sp		; Drop from stack
+ ror  r0		; Get Carry back
+#else
+ CLR  R0		; fd=STDIN
+ TRAP 3			; SYS read
+ EQUW charbuf		; data buffer
+ EQUW 1			; 1 byte
+#endif
+BCS  exit		; End of file, exit
+TST  R0
+BEQ  exit		; Nothing read, exit
+JSR  PC,wrch
+BR   loop
+.exit
+JSR  PC,vdu20reset	; Reset colours
+CLR  R0
+#ifdef BSD
+ CLR -(SP)
+#endif
+TRAP 1			; SYS exit
+HALT
+
+; Process output character
+; ------------------------
+.wrch
+MOVB charbuf,R0
+MOVB vduQ,R1
+BNE  pending		; VDU queue pending
+CMP  R0,#32
+BCS  control		; Control character
+CMP  R0,#127
+;BEQ  delete		; VDU 127
+BEQ  vdu127		; VDU 127
+
+; Send raw character in buffer to STDOUT
+; --------------------------------------
+.vduraw
+MOV  #1,R0		; fd=STDOUT
+.vdu02			; Printer On
+.vdu03			; Printer Off
+.vdu04			; Text
+.vdu05			; Graphics
+.vdu06			; Enable
+.vdu07			; Bell
+.vdu08			; Left
+.vdu13			; CR
+.vdu14			; Page On
+.vdu15			; Page Off
+.vdu16			; CLG
+.vdu21			; Disable
+.vdu27			; Escape
+#ifdef BSD
+ mov  #1,-(sp)		; 1 byte
+ mov  #charbuf,-(sp)	; data buffer
+ jmp  bsd_output
+#else
+ TRAP 4			; SYS write
+ EQUW charbuf		; data buffer
+ EQUW 1			; 1 byte
+#endif
+
+;.vdu00			; NULL
+.vdu18			; GCOL
+.vdu19			; Palette
+.vdu23			; DEFCHR
+.vdu24			; Graphics window
+.vdu25			; PLOT
+.vdu26			; Reset windows
+.vdu28			; Text window
+.vdu29			; Origin
+.return
+RTS  PC
+
+; VDU queue pending
+; -----------------
+.pending
+MOVB R0,vduQueue(R1)	; Store in VDU queue
+INCB vduQ
+BNE  return		; Waiting for more parameters
+MOVB vduChar,R0		; Get current control character
+ASL  R0
+MOV  vduAddrs(R0),R1	; R1=dispatch address+parameters
+BIC  #&F000,R1		; Mask off parameters
+.dispatch
+MOV  #1,R0		; Prepare R0 handle=STDOUT
+JMP  (R1)		; Jump to control routine
+
+; Control characters
+; ------------------
+;.delete
+;MOV  #32,R0		; Convert VDU 127 to 32
+.control
+MOVB R0,vduChar
+ASL  R0			; R0 will be <128, so Cy will become 0
+RORB vduflags		; Use CC to also clear VDU10 flag
+MOV  vduAddrs(R0),R1	; R1=dispatch address+parameters
+BIT  R1,#&F000
+BEQ  dispatch		; No parameters, dispatch
+SWAB R1
+ASR  R1
+ASR  R1
+ASR  R1
+ASR  R1			; Number of parameters in b0-b3
+BIS  #&F0,R1
+MOVB R1,vduQ		; 256-(Number of params to wait for)
+RTS  PC
+
+; VDU 127 - Delete
+; ----------------
+.vdu127
+#ifdef BSD
+ mov  #3,-(sp)		; 3 bytes
+ mov  #ANSdelete,-(sp)	; ANSI delete
+ jmp  bsd_output
+#else
+ TRAP 4			; SYS write
+ EQUW ANSdelete		; ANSI delete
+ EQUW 3			; 3 bytes
+ RTS  PC
+#endif
+
+; VDU 0 - NULL, but toggle VDU 10 flag
+; ------------------------------------
+.vdu00
+ROLB vduflags		; Move flag back to b7
+ADD  #&80,vduflags	; And toggle it
+RTS  PC
+
+; VDU 1 - Next as raw character
+; -----------------------------
+.vdu01
+#ifdef BSD
+ mov  #1,-(sp)		; 1 byte
+ mov  #vduQueue-1,-(sp)	; data buffer
+ jmp  bsd_output
+#else
+ TRAP 4			; SYS write
+ EQUW vduQueue-1	; The byte in the queue
+ EQUW 1			; 1 byte
+ rts  pc
+#endif
+
+; VDU 9 - Right
+; -------------
+.vdu09
+#ifdef BSD
+ mov  #ANSdown-ANSright,-(sp) ; length of sequence
+ mov  #ANSright,-(sp)	      ; ANSI right
+ jmp  bsd_output
+#else
+ TRAP 4			  ; SYS write
+ EQUW ANSright		  ; ANSI right
+ EQUW ANSdown-ANSright	  ; length of sequence
+ rts  pc
+#endif
+
+; VDU 10 - Down
+; -------------
+; Must translate to newline, otherwise OSCLI("command") doesn't newline properly.
+.vdu10
+ROLB vduflags		  ; Restore and test VDU10 flag
+#ifdef BSD
+ bmi  vdu10newl		   ; Force VDU10 to NEWLINE
+ mov  #ANSup-ANSdown,-(sp) ; length of sequence
+ mov  #ANSdown,-(sp)	   ; ANSI down
+ jmp  bsd_output
+ .vdu10newl
+ mov  #2,-(sp)		  ; 2 bytes
+ mov  #RAWnewl,-(sp)	  ; NEWLINE
+ jmp  bsd_output
+#else
+ BMI  vdu10newl		  ; Force VDU10 to NEWLINE
+ TRAP 4			  ; SYS write
+ EQUW ANSdown		  ; ANSI down
+ EQUW ANSup-ANSdown	  ; length of sequence
+ RTS  PC
+ .vdu10newl
+ TRAP 4			  ; SYS write
+ EQUW RAWnewl		  ; NEWLINE
+ EQUW 2  		  ; 2 bytes
+ RTS  PC
+#endif
+
+; VDU 11 - Up
+; -----------
+.vdu11
+#ifdef BSD
+ mov  #ANScls-ANSup,-(sp) ; length of sequence
+ mov  #ANSup,-(sp)	  ; ANSI up
+ jmp  bsd_output
+#else
+ TRAP 4			  ; SYS write
+ EQUW ANSup		  ; ANSI up
+ EQUW ANScls-ANSup	  ; length of sequence
+ rts  pc
+#endif
+
+; VDU 22,n - MODE
+; ---------------
+.vdu22
+JSR  PC,vdu20		; Reset colours
+MOV  #1,R0		; handle=STDOUT
+			; Then clear screen
+
+; VDU 12 - CLS
+; ------------
+.vdu12
+#ifdef BSD
+ mov  #4,-(sp)		; 4 bytes
+ mov  #ANScls,-(sp)	; ANSI cls
+ jsr  pc,bsd_callout
+#else
+ TRAP 4			; SYS write
+ EQUW ANScls		; ANSI cls
+ EQUW 4			; 4 bytes
+#endif
+			; Then HOME cursor
+
+; VDU 30     - Home
+; VDU 31,x,y - TAB
+; -----------------
+.vdu30
+CLR  vduQueue-2		; Preload TAB(0,0)
+.vdu31
+ADD  #&0101,vduQueue-2	; ANSI starts from (1,1)
+MOV  #ANStab+2,R1
+MOVB vduQueue-1,R0	; Y coordinate
+JSR  PC,vduDecimal	; Output as decimal
+MOVB #59,(R1)+
+MOVB vduQueue-2,R0	; X coordinate
+JSR  PC,vduDecimal	; Output as decimal
+#ifdef BSD
+ mov  #10,-(sp)		; 10 bytes
+ mov  #ANStab,-(sp)	; ANSI tab
+ jmp  bsd_output
+#else
+ MOV  #1,R0		; fd=STDOUT
+ TRAP 4			; SYS write
+ EQUW ANStab		; ANSI tab
+ EQUW 10		; 10 bytes
+ RTS  PC
+#endif
+
+.vduDecimal
+MOVB #ASC"0"-1,(R1)	; Start with '0'-1 for hundreds
+.vduDecLp1
+INCB (R1)		; Increment hundreds digit
+SUB  #100,R0		; Subtract 100 from R0
+BCC  vduDecLp1		; Loop until <0
+INC  R1			; Step past hundreds digit
+
+ADD  #100,R0		; Balance last SUB #100
+MOVB #ASC"0"-1,(R1)	; Start with '0'-1 for tens
+.vduDecLp2
+INCB (R1)		; Increment tens digit
+SUB  #10,R0		; Subtract 10 from R0
+BCC  vduDecLp2		; Loop until <0
+INC  R1			; Step past tens digit
+
+ADD  #ASC"0"+10,R0	; Convert back to units
+MOVB R0,(R1)+
+RTS PC
+
+; VDU 20 - Reset colours
+; ----------------------
+.vdu20reset
+MOV  #1,R0		; handle=STDOUT
+.vdu20
+MOV  #&3037,txtFGD	; Set current colours
+#ifdef BSD
+ mov  #4,-(sp)		; 4 bytes
+ mov  #ANSreset,-(sp)	; ANSI default colours
+ jmp  bsd_output
+#else
+ TRAP 4			; SYS write
+ EQUW ANSreset		; ANSI default colours
+ EQUW 4			; 4 bytes
+ RTS  PC
+#endif
+
+; VDU 17,n - COLOUR
+; -----------------
+; PRINTCHR$27;"[0";
+; IF (A AND 16):PRINT";5";  :REM flash
+; IF (A AND 32):PRINT";4";  :REM underline
+; IF (A AND 64):PRINT";7";  :REM inverse
+; IF (A AND 128)=0:PRINT";";30+(A AND 7);:IF (A AND 8):PRINT";1";               :REM foreground colour
+; IF (A AND 128)  :PRINT";";40+(A AND 7);:IF (A AND 8):PRINT";";100+(A AND 7);  :REM background colour
+; PRINT"m";
+; NB: Some platforms [21m is not the opposite of [1m so cannot optimise further. The consistant way to
+; turn bright off is [0m, so need to remember colours and reselect them. On some platforms even [22m
+; does not turn bright off.
+;
+.vdu17
+MOVB vduQueue-1,R0	; Get COLOUR parameter
+BISB #ASC"0",R0		; Convert to digit
+BPL  vdu17_setfgd	; COLOUR &00+n, set foreground
+CMPB R0,#&C0
+BCC  vdu17_exit		; COLOUR &C0+n, set border, unimplemented
+MOVB R0,txtBGD		; Set as current background
+BR   vdu17_colour
+.vdu17_setfgd
+MOVB R0,txtFGD		; Set as current foreground
+.vdu17_colour
+;
+MOVB vduQueue-1,R0	; Get COLOUR parameter again
+MOV  #ANScolour+3,R1	; R1=>output string after initial [0
+MOVB #&3B,(R1)+		; Insert semicolon, R1 is now aligned
+BIT  #64,R0
+BEQ  vdu17_noinvert
+MOV  #&3B00+ASC"7",(R1)+; Invert on     "7;"		ALIGNED
+.vdu17_noinvert
+BIT  #32,R0
+BEQ  vdu17_nounderline
+MOV  #&3B00+ASC"4",(R1)+; Underline on  "4;"		ALIGNED
+.vdu17_nounderline
+BIT  #16,R0
+BEQ  vdu17_noflash
+MOV  #&3B00+ASC"5",(R1)+; Flash on      "5;"		ALIGNED
+.vdu17_noflash
+;
+MOVB txtFGD,R0		; Get current foreground
+BIT  #8,R0
+BEQ  vdu17_nobright	; Not bright foreground
+MOV  #&3B00+ASC"1",(R1)+; Bright on     "1;"		ALIGNED
+.vdu17_nobright
+MOVB #ASC"3",(R1)+	; Prefix for foreground		ALIGNED
+BIC  #&FFC8,R0		; Reduce to '0'-'7'
+MOVB R0,(R1)+		; Foreground colour
+MOVB #&3B,(R1)+		;		";"		ALIGNED
+;
+MOVB txtBGD,R0		; Get current background
+MOVB #ASC"4",(R1)+	; Prefix for foreground
+BIC  #&FFC8,R0		; Reduce to '0'-'7'
+MOVB R0,(R1)+		; Background colour		ALIGNED
+BITB #8,txtBGD
+BEQ  vdu17_write	; Not bright background
+MOVB #&3B,(R1)+		;		";"
+MOV  #&3031,(R1)+	; Prefix for bright background	ALIGNED
+MOVB R0,(R1)+		; Bright background colour	ALIGNED
+;
+.vdu17_write
+MOVB #ASC"m",(R1)+	; Terminator
+MOV  #ANScolour,R0
+SUB  R0,R1		; R1=length of character stream
+MOV  R1,trapColour+4
+#ifdef BSD
+ mov  trapColour+4,-(sp) ; count
+ mov  trapColour+2,-(sp) ; address
+ jmp  bsd_output
+#else
+ MOV  #1,R0		; handle=STDOUT
+ TRAP 0			; SYS indirect
+ EQUW trapColour
+#endif
+.vdu17_exit
+RTS  PC
+
+#ifdef BSD
+ .bsd_callout
+; On entry: SP=>ret, address, length
+ mov  (sp)+,r0		; SP=>address, length
+ mov  (sp),-(sp)	; SP=>address, address, length
+ mov  4(sp),2(sp)	; SP=>address, length, length
+ mov  r0,4(sp)		; SP=>address, length, ret
+;
+ .bsd_output
+; On entry: SP=>address, length, ret
+ mov  #1,-(sp)		; SP=>stdout, address, length, ret
+ clr  -(sp)		; SP=>padding, stdout, address, length, ret
+ TRAP 4			; SYS write
+ add  #8,sp		; Drop from stack
+ rts  pc
+#endif
+
+; Dispatch addresses and parameters
+; ---------------------------------
+.vduAddrs
+EQUW (vdu00 AND &FFF) OR &0000 ; NULL
+EQUW (vdu01 AND &FFF) OR &F000 ; Printer
+EQUW (vdu02 AND &FFF) OR &0000 ; Printer On
+EQUW (vdu03 AND &FFF) OR &0000 ; Printer Off
+EQUW (vdu04 AND &FFF) OR &0000 ; Graphics
+EQUW (vdu05 AND &FFF) OR &0000 ; Graphics
+EQUW (vdu06 AND &FFF) OR &0000 ; Enable
+EQUW (vdu07 AND &FFF) OR &0000 ; BELL
+EQUW (vdu08 AND &FFF) OR &0000 ; Left
+EQUW (vdu09 AND &FFF) OR &0000 ; Right
+EQUW (vdu10 AND &FFF) OR &0000 ; Down
+EQUW (vdu11 AND &FFF) OR &0000 ; Up
+EQUW (vdu12 AND &FFF) OR &0000 ; CLS
+EQUW (vdu13 AND &FFF) OR &0000 ; CR
+EQUW (vdu14 AND &FFF) OR &0000 ; Page On
+EQUW (vdu15 AND &FFF) OR &0000 ; Page Off
+EQUW (vdu16 AND &FFF) OR &0000 ; CLG
+EQUW (vdu17 AND &FFF) OR &F000 ; COLOUR
+EQUW (vdu18 AND &FFF) OR &E000 ; GCOL
+EQUW (vdu19 AND &FFF) OR &B000 ; Set Palette
+EQUW (vdu20 AND &FFF) OR &0000 ; Reset Colours
+EQUW (vdu21 AND &FFF) OR &0000 ; Disable VDU
+EQUW (vdu22 AND &FFF) OR &F000 ; MODE
+EQUW (vdu23 AND &FFF) OR &7000 ; DEFCHR$
+EQUW (vdu24 AND &FFF) OR &8000 ; Define Graphics Window
+EQUW (vdu25 AND &FFF) OR &B000 ; PLOT
+EQUW (vdu26 AND &FFF) OR &0000 ; Clear Windows
+EQUW (vdu27 AND &FFF) OR &0000 ; Escape
+EQUW (vdu28 AND &FFF) OR &C000 ; Define Text Window
+EQUW (vdu29 AND &FFF) OR &C000 ; ORIGIN
+EQUW (vdu30 AND &FFF) OR &0000 ; HOME
+EQUW (vdu31 AND &FFF) OR &E000 ; TAB
+; EQUW (vdu127 AND &FFF) OR &0000 ; Delete
+
+; Initialised data
+; ----------------
+._DATA%
+.RAWnewl	EQUS 10,13	; Newline
+.ANSdelete	EQUS 8,32,8	; Delete
+;.ANSleft	EQUS 27,"[D"	; Left
+.ANSright	EQUS 27,"[C"	; Right
+;.ANSdown	EQUS 27,"[B"	; Down, fails on bottom line
+.ANSdown	EQUS 27,"D"	; Down, works on bottom line
+;.ANSup		EQUS 27,"[A"	; Up, fails on top line
+.ANSup		EQUS 27,"M"	; Up, works on top line
+.ANScls		EQUS 27,"[2J"	; CLS
+.ANSreset	EQUS 27,"[0m"	; Default colours
+;		EQUS 27,"[000,000H"		; Home/TAB
+.ANStab		EQUS 27,"[Ver"
+		EQUB ASC"0"+((VERSION AND &F00) DIV 256)
+		EQUB "."
+		EQUB ASC"0"+((VERSION AND &0F0) DIV 16)
+		EQUB ASC"0"+((VERSION AND &00F) DIV 1)
+		EQUS "H"			; Home/TAB
+		ALIGN
+.ANScolour	EQUS 27,"[0,5,4,7,30,1,40,100m"	; COLOUR
+;		      0  101010101010101010101
+		ALIGN
+.trapColour	TRAP 4
+		EQUW ANScolour
+		EQUW 18
+.txtFGD		EQUS "7"
+.txtBGD		EQUS "0"
+
+; Uninitialised data
+; ------------------
+._BSS%		BSS
+.vduChar	EQUB 0
+		EQUB 0,0,0,0,0,0,0,0,0
+ALIGN
+.vduQueue
+.vduQ		EQUB 0
+ALIGN
+.vduflags	EQUB 0
+.charbuf	EQUB 0
+._END%

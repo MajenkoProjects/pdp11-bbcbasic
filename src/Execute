@@ -1,0 +1,305 @@
+; > Execute
+; Program execute dispatch loop
+
+; CHANGES
+; =======
+; 17-Jan-2009: Line continuation character within SkipSpaces.
+; 25-Oct-2009: Places zero word at top of stack so 2(sp) can be examined.
+; 15-May-2010: End-Of-Program doesn't check for TOP.
+; 21-Jan-2012: TRACE output works, END quits if run-quit flag set.
+; 13-Dec-2013: Error scans program to find line where error occured.
+;              ON ERROR LOCAL works, continuing with local stack.
+; 24-Dec-2013: On untrapped error, if QUIT=TRUE, jumps to IO_QUIT.
+; 03-Jan-2013: Don't SkipSpace before jumping to VarAssign, fixes "a =1" bug.
+; 31-Aug-2015: Low numbered commands use lookup table instead of loads of CMPs.
+;              Moved call to OSBYTE &7E to error handler.
+; 29-Sep-2015: Low command token lookup made position independent.
+; 25-Jul-2015: Speeded up SkipSpace by removing bic #&FF00.
+; 12-Aug-2023: Optimised execution loop and line scanning.
+
+
+; Generate inline error
+; =====================
+; On entry, sp=>inline error address
+;
+.Error
+.ErrorHandler1
+mov  (sp)+,r0		; Pop return address to inline error block
+;
+; Error handler
+; =============
+; On entry, r0=>inline error
+;           LINE=BASIC line when error occured
+;           We have to use LINE as we will have lost r5 when going through BRKV
+;
+.ErrorHandler
+mov  SV_LINE,SV_ERL	; Save current error line
+clr  SV_TRACE		; TRACE OFF
+mov  r0,SV_FAULT	; Save current error
+movb (r0),SV_ERR	; Save current error number
+beq  ErrorNotLocal	; If ERR=0, ignore ON ERROR (won't be Escape)
+mov  #126,r0
+jsr  pc,IO_BYTE		; Acknowledge any Escape state
+clrb SV_ESCFLG		; Clear local Escape flag
+mov  SV_ONERR,r5	; Get ON ERROR handler
+beq  ErrorNotLocal	; No error handler
+mov  SV_STACK,sp	; Point to local stack
+cmpb (r5)+,#tknLOCAL	; Is it ON ERROR LOCAL ?
+beq  Execute		; Jump to execute with local stack
+dec  r5			; Step back to non-existant LOCAL
+mov  SV_HIMEM,sp	; Clear BASIC stack
+clr  -(sp)		; Put zero at top of stack
+mov  sp,SV_STACK	; Reset error stack
+br   Execute		; Jump to execute with empty stack
+.ErrorNotLocal
+mov  SV_HIMEM,sp	; Clear machine stack
+jsr  pc,cmdREPORT	; Display error message
+tstb SV_SYS		; Check run-quit flag
+bmi  ErrorNoErl		; QUIT=TRUE, don't print line number
+mov  SV_ERL,r4		; Get error line
+beq  ErrorNoErl		; Avoid printing 'at line 0'
+jsr  pc,PrintInline
+equb " at line ",0
+align
+jsr  pc,PrintLineNum	; Print line number with no space padding
+.ErrorNoErl
+jsr  pc,IO_NEWL
+movb SV_ERR,r0		; r0=ERR if QUIT=TRUE
+bic  #&FF00,r0
+br   cmdEND3
+
+; END
+; ===
+.cmdEND
+jsr  pc,FindTOP		; Check program, R5=>end
+.cmdEND2
+clr  r0			; Return value=0
+.cmdEND3
+tstb SV_SYS		; Check run-quit flag
+bmi  cmdENDQuit
+clr  SV_AUTO		; Turn off AUTO
+jmp  ImmediateLoop	; Drop to immediate mode
+.cmdENDQuit
+jmp  IO_QUIT		; Jump to QUIT
+
+
+;tstb SV_SYS		; Check run-quit flag
+;bmi  cmdENDQuit	; QUIT=TRUE, exit
+;.ErrorImmediate
+;clr  SV_AUTO		; Turn off AUTO
+;jmp  ImmediateLoop	; Drop to immediate mode
+;;br  cmdEND		; Check for TOP and drop to immediate mode
+;			; Jumping to cmdEND causes repeated errors if
+;			; FindTOP walks into invalid memory
+
+
+; RUN [str$]
+; ==========
+; Run program in memory or chain program from file
+.cmdRUN
+jsr  pc,CheckEndStatement ; Any parameters?
+beq  RunProgram		  ; No, RUN program
+
+; CHAIN str$
+; ==========
+; Fetch CR-string
+; Call LoadProgram
+; Continue into RUN
+.cmdCHAIN
+jsr  pc,EvalStringCR	; Get cr-string parameter
+
+; ChainStartup
+; ------------
+; Chain program, name already at R4
+.ChainStartup
+jsr  pc,LoadProgram	; Load file as a program (should also clear heap)
+
+; RUN - Run program in memory
+; ===========================
+; LOMEM=TOP
+; VAREND=TOP
+; DATAPTR=PAGE
+; STACK=HIMEM
+; Clear dynamic variables
+; Clear error handler
+; LPTR=PAGE
+; Enter Execution loop
+.RunProgram
+jsr  pc,VarsHeapInit	; LOMEM=TOP, VAREND=TOP, DATAPTR=PAGE, STACK=HIMEM, stack zero
+clr  SV_ONERR		; Clear error handler
+mov  SV_PAGE,r5		; Point to <cr> at start of program
+;
+; Execute program code
+; =====================
+; R5=BASIC program pointer
+; R4/R3=32-bit accumulator
+; R2=value type/exponent
+; R1/R0=working
+;
+.Execute
+jsr  pc,UpdateLPTRnext	; R0=char, R5=>next char, skipping spc, colon, cr
+cmpb r0,#tknTHEN
+beq  Execute		; Step past THEN
+jsr  pc,ExecByte	; Execute this byte
+jsr  pc,IO_Escape	; Check Escape state
+br   Execute		; Execute next statement
+
+; Execute command represented by the current byte
+; -----------------------------------------------
+; This is a subroutine so command routines can end with RTS
+; On entry, R0=&FFxx for tokens >&7F
+;           R0=&00xx for characters <&80
+;           R5=>next byte
+.ExecByte
+sub  #&FFC6,r0		; Reduce range
+bcs  ExecLowCommand	; Not a command token, check for low numbered commands
+.ExecByteCommand
+asl  r0			; Offset into command table
+adr  CommandTable,r1	; Point to command address table
+add  r0,r1		; Index into command table
+add  (r1),r1		; Calculate routine address
+jmp  (r1)		; Jump to command routine, (r5)=>current char
+
+.ExecLowCommand
+mov  r0,r1		; Move byte-&FFC6 into R1
+mov  #&101-&C6,r0	; R0=effective token number &101+
+adr  CommandBytes,r2	; R2=>command translation table
+.ExecLowCommandLp
+cmpb (r2)+,r1		; Byte compare, so ignores b8-b15
+beq  ExecByteCommand	; Low token matches, use translated token
+inc  r0
+cmp  r0,#&10A-&C6
+bne  ExecLowCommandLp	; Loop through low numbered tokens
+dec  r5			; Point to start of variable
+jmp  cmdAssign		; Must be variable assignment
+
+; Update LPTR to skip null code, spaces, colons, end of line
+; ----------------------------------------------------------
+; On entry, r5=>current character
+; On exit,  r0= current character
+;           r5=>next character
+;           Flags corrupted
+;
+.UpdateLPTRnext
+movb (r5)+,r0
+cmpb r0,#ASC" "
+beq  UpdateLPTRnext	; Step past spaces
+cmpb r0,#&3A
+beq  UpdateLPTRnext	; Step past colons
+cmpb r0,#13
+bne  SkipLineDoneX	; Return with character
+movb (r5)+,r0		; Get byte after <cr>
+cmpb r0,#&FF		; Program terminator?
+beq  cmdEND2		; End of program, do END
+movb r0,SV_LINE+1	; Store current line number high byte
+movb (r5)+,SV_LINE+0	; Store current line number low byte
+inc  r5			; Step past line length, r5=>line text
+mov  SV_TRACE,r1	; Get TRACE status
+beq  UpdateLPTRnext	; TRACE OFF, do next line
+mov  SV_LINE,r4
+cmp  r4,r1		; Compare line number with trace line
+bcs  UpdateLPTRnext	; line<trace line, do next line
+mov  #ASC"[",r0		; Print trace line number
+jsr  pc,IO_WRCH
+jsr  pc,PrintLineNum	; Prints line number with no padding
+mov  #ASC"]",r0
+jsr  pc,IO_WRCH
+mov  #ASC" ",r0
+jsr  pc,IO_WRCH
+br   UpdateLPTRnext	; Continue scanning next line
+
+; *command
+; ========
+.cmdStar
+mov  r5,r0		; Point to *command
+jsr  pc,IO_CLI		; Pass to CLI
+;			; Fall though to skip line
+;
+; Skip past a line, *command, REM, etc
+; ------------------------------------
+.cmdELSE
+.cmdREM
+.cmdDEF
+.cmdDATA
+.SkipLine
+cmpb (r5)+,#13		; Get character
+bne  SkipLine		; Loop until <cr>
+br   SkipLineDone	; Point to <cr>
+
+; Fetch next non-space character
+; ------------------------------
+.FetchNextChar
+inc  r5			; Step past current character
+;
+.SkipSpaceThis
+jsr  pc,SkipSpaceNext
+.SkipLineDone
+dec  r5			; R0=this char, R5=>this char
+.SkipLineDoneX
+rts  pc
+
+; Skip past any spaces, and return current character
+; --------------------------------------------------
+; Returns r0=current char, r5=>next char
+;
+.SkipSpaceNext		; return r5=>this char
+movb (r5)+,r0
+cmpb r0,#ASC" "
+beq  SkipSpaceNext	; Loop until non-space
+rts  pc
+
+; Check for end of statement, returns Z if end of statement
+; ---------------------------------------------------------
+.CheckEndStatement
+movb (r5)+,r0
+cmpb r0,#ASC" "
+beq  CheckEndStatement	; Skip any spaces
+dec  r5
+.CheckEndToken
+cmpb r0,#tknELSE
+bcc  CheckEndStRet
+;.CheckColon
+cmp  r0,#&3A
+bcc  CheckEndStRet
+cmp  r0,#&0D
+.CheckEndStRet
+rts  pc
+
+; Check for numeric characters
+; ----------------------------
+; Needs optimising
+; Returns CC=Ok digit, R0=&30-&3F
+;         CS=Not digit
+.GetHexOctBin
+movb (r5)+,r0		; Get next digit
+cmpb r0,#ASC"0"
+bcs  CheckDigitExit	; Exit with CS if <'0'
+cmpb r0,r1
+bls  CheckHexDigit	; Check digit
+sec
+rts  pc
+
+.CheckHexNext
+movb (r5)+,r0		; Get next hex digit
+.CheckHexDigit
+jsr  pc,CheckDigit	; Is it decimal digit?
+bcc  CheckDigitExit	; CC=digit
+bic  #&20,r0
+cmp  r0,#ASC"A"
+bcs  CheckDigitExit
+cmp  #ASC"F",r0
+bcs  CheckDigitExit	; CS=not digit
+sub  #7,r0		; Reduce to &3A-&3F
+rts  pc			; CC=digit
+
+; Returns CC if digit, CS if nondigit
+.FetchCheckDigit
+movb (r5)+,r0		; Get character
+.CheckDigit
+cmp r0,#ASC"0"		; r0<'0' C=1, r0>='0' C=0
+bcs CheckDigitExit	; Exit with CS if <'0'
+cmp #ASC"9",r0		; '9'<r0 C=1, '9'>=r0 C=0
+			; r0>'9' C=1, r0<='9' C=0
+.CheckDigitExit		; Exit with CS if >'9'
+rts pc
+

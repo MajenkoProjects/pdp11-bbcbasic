@@ -1,0 +1,150 @@
+; > Version
+; BBC BASIC for the PDP11
+; (C)J.G.Harston 1988-2023
+;
+; Set version information
+; -----------------------
+; 24-May-2006 v0.10 Added skeleton error handler
+; 28-Jan-2008 v0.11
+; 25-Feb-2009 v0.13
+; 25-Oct-2009 v0.14 Places zero word at top of stack so 2(sp) can be examined
+; 25-Jan-2012 v0.15 Program can be edited from immediate mode
+; 12-Jul-2013 v0.16 Floating point addition, multiplication, division
+; 16-Aug-2013       Tokenising and inserting lines into program callable from TextLoad
+; 20-Nov-2013       FOR/NEXT, INSTR()
+; 07-Dec-2013       READ, SAVE (noname), PROC/FN (no params), ENDPROC/=.
+; 09-Dec-2013 v0.17 AddrOf PROC/FN, PROC/FN(params).
+; 25-Dec-2013 v0.18 LOCAL ERROR/DATA/variables, ON ERROR LOCAL, RESTORE +<offset>
+; 30-Dec-2013 v0.19 Tidied up TTY settings in UnixIO, notes istty() on stdin/stdout,
+;                   fixed Unix6 problems, generalised OSCLI command table.
+;                   INPUT, INPUT# implemented, Unix7 reads centisecond TIME.
+;                   Remove Line doesn't match OSCLI token as end-of-prog marker.
+; 05-Feb-2014 v0.20 DIM array() implemented, DEFFNname(A$):A$=something:=A$ works.
+; 16-Aug-2015       VDU(n) returns 8-bit values.
+; 26-Aug-2015       EVAL evaluates string on stack to protect string buffer.
+; 31-Aug-2015 v0.21 Low numbered commands and high numbered functons use
+;                   lookup table instead of dispatch table.
+; 09-Sep-2015 v0.22 ON GOTO/GOSUB implemented. Bug where FN(addr)+num called
+;                   '(addr)+num' instead of '(addr)' fixed. Real DIMs now
+;                   work. RND(n) works, correctly giving reals 0..1 and
+;                   integers 1..n. RND seed updated as per 6502 BASIC, conversion
+;                   to user value matches BASIC 2, different from BASIC 4.
+; 18-Oct-2015 v0.23 ROMHeader checks if Tube CPU is a PDP11.
+; 22-Jul-2016 v0.24 Signal handlers set up from a table, removed double-vectoring.
+;                   Trimmed stty() calls on startup, tweeked CmdLine scanning.
+; 31-Jul-2016       Scanning fractional and exponential decimals implemented.
+; 21-Aug-2016 v0.25 Multiplication rounding corrected, 0.5 = 1/2.
+; 09-Jul-2016 v0.26 EnsureInteger truncates, INT rounds downwards.
+; 04-Jul-2018 v0.27 Various optimisations to Interface routines.
+; 19-Aug-2018 v0.30 Anchored @% at PAGE-&100 to ensure ProgEnv can read command string.
+; 26-Aug-2018 v0.31 NumberToString float support, currently fixed at 9 digits General
+;                   format. ScanDecimal generates error if numbers larger than 10^9
+;                   unless E format.
+; 09-May-2020 v0.32 MultiplyInt checks for <&8000 x <&8000, TokenFind doesn't skip
+;                   zero-length lines. PROC@LOAD, FN@SAVE allowed, IF x THEN var=1
+;                   doesn't tokenise the number, STRING$(n,MID$(...)) works.
+; 11-May-2020       Various work to UnixIO and RT11IO.
+; 20-Jun-2020       Added *ESC (ON|OFF), merged ANSI and UKNC VDU driver code.
+; 22-Jun-2020 v0.33 RT11 and UKNC extended key handler working, initial INKEY() code.
+; 28-Jun-2020 v0.34 Unix v6,v7 keyboard interface recognises function/editing keys.
+;                   Unix v6 does pseudo-background Escape polling.
+; 30-Jun-2020       Optimised extended keypress reading. InitTTY recognises Unix v5,
+;                   Unix v5 extended keypresses and pseudo-background Escape work.
+; 30-Jun-2020       Optimised RT11 extended keypress reading.
+; 12-Jul-2020 v0.35 Added delay to TTYtest to cope with telnet delays. Searches for kbdQ.
+; 13-Mar-2021       LIST doesn't detokenise within strings.
+; 16-Mar-2021 v0.36 DIV 32bit corrected, VAL"nonnum" fixed, error within EVAL fixed.
+; 16-Sep-2021       RT11 polls Escape on a ticker as with Unix pre v7.
+; 28-Dec-2021       UKNC reworked COLOUR to use shorter sequences, implemented MODE.
+;                   RT11 GETKEY swallows <lf> after <cr>, faster Escape check, tweeked
+;                   GETtty, tweeks to VDU 127,8,9,10,11.
+; 31-Dec-2021       Cursor control selects appropriate VT52 or VT100 control sequences.
+;                   Avoids sending colours to VT52.
+; 05-Jan-2022 v0.37 RT11 <esc> doesn't lose characters, sent via vduraw, tweeked Escape.
+; 07-Jan-2022       Bugfix added to LOCAL to avoid bug in RT11Em.
+; 19-Jan-2022       UKNC reads 8-bit chars from CONIN. Looking for POS/VPOS.
+; 27-Jul-2002       Starting to work out BSD2.9 API.
+; 29-Jul-2022       Switches stack out of stack segment for BSD.
+; 01-Aug-2022 v0.38 Detects and runs on BSD2.9 - can't find kbdQ at the moment.
+;                   Added ADVAL(-1). BSD2.11: load/save, =TIME.
+;                   FloatDivide uses fixed 32-bit SUB, NumToString checks for overflow
+;                   to 1.0. Optimised by using FloatToString for IntToString.
+; 25-Sep-2022 v0.39 Rewritten and optimised DivideFloat.
+; 28-Sep-2022 v0.40 UKNC should be able to read POS/VPOS/MODE from VDU system, but can't
+;                   work out how to, so in interim fakes via local variables.
+; 14-Apr-2023 v0.41 Common API code moved to IOCommon from IOUnix and IORT11.
+; 02-Aug-2023 v0.42 Moved common keyboard code from IOUnix and IORT11 to AnsiKBD.
+; 08-Aug-2023 v0.43 OSCLI calling external works on BSD211, *chdir works.
+; 14-Aug-2023       Optimised and refactored execution loop and line scanning.
+; 16-Aug-2023       Working on BSD211 KBD_Wait, etc.
+; 19-Aug-2023       Combined fopen and data transfer from OSGBPB and OSFILE.
+; 20-Aug-2023       BSD211 OSARGS and EOF done.
+; 15-Sep-2023 v0.44 Shell command wrapped in VDU0 to signal LF conversion, RT11 munged
+;                   VDU10 and VDU 11 to work on various terminals.
+; 03-Oct-2023       Unwinding FN drops subroutines addresses when resetting SV_STACK.
+; 01-Mar-2024 v0.45 RT11 shell() calls a command via EXIT and and returns, so *. works.
+;                   If command generates an error, drops to KMON. Tweeked tests for
+;                   VT52/UKNC for RT11v5.7 on UKNC.
+; 10-Mar-2024       Tweeks for oddities in various PuTTY setttings and fkey overlaps.
+; 12-Mar-2024       CallSub/RetSub pushes/pops SV_STACK - optimised code and fixed
+;                   FN unwinding bug.
+; 18-Mar-2024       LOAD/SAVE checks for end-of-statement if immediate command, tweeked
+;                   textload and FindTOP. Restructured ImmLineNum and InsLine to use new
+;                   return from Tokeniser. HIMEM= sets SV_STACK, lots of small misc.
+;                   optimisations. Channels use HashVal instead of HashExpression.
+; 27-Mar-2024 v0.46 RT11IO optimised IO_xxx entries, all errors generate errors.
+; 07-Apr-2024       Stacking strings checks for free memory.
+; 09-Apr-2024       UnixIO optimised IO_xxx entries, all errors generate errors.
+; 12-Apr-2024       BGET/BPUT merged code, BGET checks for EOF, better EOF routine.
+; 19-Apr-2024       BSD211 signals now working, tidied up and optimised.
+; 30-Apr-2024       BSD2.9 tests keyboard buffer so function keys work.
+; 30 Jul 2024 v0.47 NumberToString uses IntegerToString again, FloatToString loses
+;                   accuracy over 999999999. Uses fast/compact DIV-based routine.
+; 31-Dec-2024       Fixed EOF handling on BGET never resetting EOF flag, also BSD clearing
+;                   EOF flag on BPUT/WRCH.
+; 27-Apr-2025       Tweeked tokeniser to correctly tokenise eg &123OR5.
+; 10-May-2025       Optimised Bin/Oct/Hex constants.
+; 23-Aug-2025       ROMHdr checks for Electron Tube and ROM table. REM/DATA only stops
+;                   tokenising at start of statement, 2-byte tokenising possible.
+; 01 Jan 2026 v0.48 Some tweeking with initial startup system checking.
+
+
+; Notes
+; -----
+; This source uses the 'ADR label,dst' pseudo-opcode. The assembler needs to implement this
+; or expand this in the manner of this macro, or uncomment this macro:
+;.MACRO	ADR label,dst
+;	MOV pc,dst
+;	ADD #label-$,dst
+;.ENDM
+
+
+; Build options
+; -------------
+; DEBUG     Include Debug module
+; VERSION   Major build version in hex
+; BUILD     Minor build number, 1/2/3/etc becomes eg v0.00a/b/c/etc
+; SKIPLINE  Allows \ line continuation character
+; VECTORS   Calls to &FFxx use vectors in BASIC workspace
+; NOMUL     Assume MUL instruction absent, multiply manually (needs MulR2byR3toR3)
+; NODIV     Assume DIV instruction absent, IntToString manually divides.
+; MUL16     Use fast checks and restrict hardware MUL to 16-bit ints
+; TUBEBUG   Bypasses bug in early Tube code
+; FILEEXTN  Include LOAD "file",addr and SAVE "file",start,end,exec,load
+; NOEXTRAFN Omit =DIM, =WIDTH, =OSCLI
+; SLOWTOKEN Slower but smaller tokeniser
+
+MUL16:		EQU	1	; Restrict fast hardware MUL to 16-bit ints
+NOEXTRAFN:	EQU	1	; Omit function extensions
+SLOWTOKEN:	EQU	1	; Smaller tokeniser
+
+
+; Version information
+; -------------------
+; Strings have to be defined before the first pass so their length is correct
+;DATE$:		EQU	MID$(TIME$,5,11)
+DATE$:		EQU	"01 Jan 2026"
+YEAR$:		EQU	RIGHT$(DATE$,4)
+VERSION:	EQU	&0048
+BUILD:		EQU	0
+

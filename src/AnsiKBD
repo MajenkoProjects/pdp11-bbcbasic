@@ -1,0 +1,221 @@
+; > AnsiKBD
+; 28-Jul-2023 Seperating out and optimising ANSI keypress processing.
+; 30-Jul-2023 New KBDTest routines, IO_Escape calls them.
+; 31-Jul-2023 Optimised ANSI keypress processing.
+; 01-Aug-2023 KBD_Test returns R0=pending, EQ/NE set.
+; 10-Mar-2024 Tweeks for oddities in various PuTTY setttings and fkey overlaps.
+
+#ifndef UKNCOK
+#define UKNCOK 0
+#endif
+
+; Low-level read from TTYIN
+; -------------------------
+; Read from local key buffer and TTYIN, translate extended keypress sequences
+; On exit: VS=No keypress
+;          VC=Key press returned
+;            R0=16-bit character code
+;
+;.KBD_TESTKEYBUF
+;jsr  pc,KBD_TestKey	; Test for keypress or get pending keypress
+;beq  KBD_GETKEYnokey	; No key pressed
+.KBD_GETKEYBUF
+jsr  pc,KBD_WaitKey	; Get the pending keypress
+cmpb r0,#27
+beq  KBD_GETKEYext	; <esc>, test for extended keypress
+#ifdef KBDUPPER
+ cmpb r0,#ASC"a"
+ bcs  KBD_GETKEYcheck
+ cmpb r0,#ASC"z"+1
+ bcc  KBD_GETKEYcheck
+ bic  #32,r0		; Force to upper case
+ .KBD_GETKEYcheck
+#endif
+#ifdef KBDCRLF
+ cmpb r0,#13
+ beq  KBD_GETKEYcr	; <cr>, swallow following <lf>
+#endif
+#ifdef UKNCADDR
+ cmp  r0,#25		; Test for UKNC cursor keys
+ bcs  KBD_GETKEYok
+ cmp  r0,#30
+ bcc  KBD_GETKEYok
+ #if UKNCOK<0
+  tst  @#UKNCADDR	    ; Look inside host's workspace
+  beq  KBD_GETKEYok	    ; EQ=not UKNC
+ #else
+  cmp  @#UKNCADDR,#UKNCOK    ; Look inside host's workspace
+  bne  KBD_GETKEYok	    ; NE=not UKNC
+ #endif
+ movb KBD_KEYUKNC-25(r0),r0 ; Translate cursor keys
+#endif
+.KBD_GETKEYok
+bic  #&FF00,r0		; Remove any sign extension, V cleared, C unchanged
+rts  pc
+#ifdef KBDCRLF
+ .KBD_GETKEYcr
+ jsr  pc,KBD_WaitKey	; Swallow following <lf>, returns CC
+ mov  #13,r0		; Clears V
+ rts  pc
+#endif
+.KBD_GETKEYesc
+mov  #27,r0		; Clears V
+rts  pc
+
+.KBD_GETKEYext		 ; <esc> - check for <nochar> or <char>
+jsr  pc,KBD_TestKeyDelay ; Test for keypress or get pending keypress
+beq  KBD_GETKEYesc	 ; <esc> <nochar>, return <esc>
+jsr  pc,KBD_WaitKey	 ; Get the keypress
+cmpb r0,#27
+beq  KBD_GETKEYext	 ; <esc><esc> - doubled prefix, keep waiting
+;
+; Could be:
+; <esc> '?' <@-7F>          -> upper/lower case translation
+; <esc> 'O' <@-7F>          -> upper/lower case translation
+; <esc> '[' (<nums>) <@-7F> -> parse sequence
+; <esc> '[' '[' <@-4F>      -> offset upper case translation
+; <esc> <@-7F>              -> upper case translation
+;
+mov  r1,-(sp)		; Save R1
+clr  r1			; Modifiers=0
+cmpb r0,#ASC"["
+beq  KBD_GETKEYopen	; <esc>[(<nums>)<letter>
+cmpb r0,#ASC"O"
+beq  KBD_GETKEYtwo	; <esc>O<letter>
+cmpb r0,#ASC"?"
+beq  KBD_GETKEYtwo	; <esc>?<letter>
+bcc  KBD_GETKEYone	; <esc><letter>
+.KBD_GETKEYnokeyPop
+mov  (sp)+,r1		; Restore R1
+.KBD_GETKEYnokey
+sev
+rts  pc			; No keypress
+
+.KBD_GETKEYsemi
+swab r1			; Swap key and modifier
+; nb: <esc>[Z is sTAB via here
+.KBD_GETKEYopen
+jsr  pc,KBD_WaitKey
+cmpb r0,#ASC"["
+beq  KBD_GETKEYtwice	; <esc>[[A-E -> P-T
+cmpb r0,#&3B
+beq  KBD_GETKEYsemi	; <num>;<num>
+;cmpb r0,#ASC"0"
+;bcs  KBD_GETKEYnokeyPop ; <'0' - no key
+cmpb r0,#ASC"9"+1
+bcc  KBD_GETKEYone	; >'9' - end of <num>
+bic  #&FFF0,r0		; Reduce digit to 0-9
+cmp  r1,#&0100
+bcc  KBD_GETKEYadd
+add  r1,r1		; *2
+mov  r1,-(sp)
+add  r1,r1		; *4
+add  r1,r1		; *8
+add  (sp)+,r1		; r1=r1*10
+.KBD_GETKEYadd
+add  r0,r1		; r1=r1*10+r0
+br   KBD_GETKEYopen	; Get another digit
+
+.KBD_GETKEYtwice
+jsr  pc,KBD_WaitKey
+add  #15,r0		; Convert 'A'+ to 'P'+
+.KBD_GETKEYone
+;cmpb r0,#ASC"@"
+;bcs  KBD_GETKEYnokeyPop	; <'@' - no key
+;cmpb r0,#&80
+;bcc  KBD_GETKEYnokeyPop	; >7F - no key
+cmp  r0,#ASC"~"
+bne  KBD_GETKEYctrl	; Not <esc>...~
+;
+; <esc>[~               - r1=0
+; <esc>[<key>~          - r1=%0000 0000 00nn nnnn -   00  <key>
+; <esc>[<key>;<mod>~    - r1=%00nn nnnn 0000 nnnn - <key> <mod>
+cmp  r1,#&0100
+bcs  KBD_GETKEYswap	 ; r1 is    00   <key>
+swab r1			 ; r1 now  <mod> <key>
+.KBD_GETKEYswap
+movb r1,r0		 ; r0=<key>
+swab r1			 ; r1 is   <key> <mod>
+add  #KBD_KEYTABLE2-KBD_KEYTABLE1,r0
+br   KBD_GETKEYtable	 ; Translate and add modifiers
+
+; nb: <esc>OZ is f11 via here
+.KBD_GETKEYtwo
+jsr  pc,KBD_WaitKey	; <esc>O<letter> and <esc>?<letter>
+cmp  r0,#ASC"Z"		; Special case for <esc>OZ
+bne  KBD_GETKEYletter
+movb #ASC"O",r0		; Can't get 'O' via this route, so use it
+;
+; <esc><letter>         - r1=0000
+; <esc>[<mod><letter>   - r1=%0000 0000 00nn nnnn -   00  <mod>
+.KBD_GETKEYletter
+bic  #&FFC0,r0		 ; Reduce to 0-63
+cmp  r0,#ASC" "
+bcc  KBD_GETKEYchar	 ; <esc>?<lowercase> -> keypad digit
+.KBD_GETKEYctrl
+bic  #&FFE0,r0		 ; Reduce to 0-31
+.KBD_GETKEYtable
+movb KBD_KEYTABLE1(r0),r0 ; Fetch from table
+beq  KBD_GETKEYnokeyPop	  ; No translation
+bic  #&FFF8,r1		  ; Reduce modifier to 0-7
+movb KBD_KEYTABLE3(r1),r1 ; Convert to XOR value
+xor  r1,r0		  ; Modify keypress
+.KBD_GETKEYchar
+bic  #&FF00,r0		 ; Drop any sign extension
+bis  #&0100,r0		 ; Return &0100+keycode
+mov  (sp)+,r1		 ; Restore R1
+rts  pc
+
+#ifdef UKNCADDR
+ .KBD_KEYUKNC
+ ;UKNC Rgt Lft
+ EQUB  &CD,&CC	; Overlaps next table
+#endif
+;
+; <esc> x  <esc> ? x  <esc> O x  <esc> [ x
+.KBD_KEYTABLE1
+;        Up  Dwn Rgt Lft Bgn End KP5
+;     @   A   B   C   D   E   F   G
+EQUB &00,&CF,&CE,&CD,&CC,&C5,&C9,&07
+;
+;    Hme     cDn cRt    KPent    f11
+;     H   I   J   K   L   M   N   O
+EQUB &C8,&00,&EE,&ED,&0C,&0D,&00,&8B
+;
+;     f1  f2  f3  f4  f5  f6  f6  f8
+;     P   Q   R   S   T   U   V   W
+EQUB &81,&82,&83,&84,&85,&86,&87,&88
+;
+;     f9 f10 sTAB f12         f6  f8
+;     X   Y   Z   [   \   ]   ^~ _7F
+EQUB &89,&8A,&D5,&8C,&8D,&8E,&86,&88
+; nb: OZ is f11, [Z is sTAB
+;
+; <esc> [ num ~
+.KBD_KEYTABLE2
+;     f6
+;     Del Hme Ins Del End PgUpPgDnHme End Num
+;     00  01  02  03  04  05  06  07  08  09
+EQUB &86,&C8,&C6,&C7,&C9,&CB,&CA,&C8,&C9,&8D
+;
+;     f0  f1  f2  f3  f4  f5      f6  f7  f8
+;     10  11  12  13  14  15  16  17  18  19
+EQUB &80,&81,&82,&83,&84,&85,&00,&86,&87,&88
+;
+;                         Prn Scr     Brk
+;     f9  f10     f11 f12 f13 f14     f15 f16
+;     20  21  22  23  24  25  26  27  28  29
+EQUB &89,&8A,&00,&8B,&8C,&80,&8E,&00,&8F,&C0
+;
+;         Menu
+;         f17 f18 f19 f20
+;     30  31  32  33  34
+EQUB &00,&C1,&C2,&C3,&C4
+;
+.KBD_KEYTABLE3
+;     0   1   2   3   4   5   6   7    modifier
+;         0   1   2   3   4   5   6    bitmap
+;        non sft alt s+a ctl c+s c+a
+EQUB &00,&00,&10,&30,&10,&20,&30,&20 ; XOR value
+ALIGN
+

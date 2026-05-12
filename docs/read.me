@@ -1,0 +1,32 @@
+                         BBC BASIC for the PDP11
+                         =======================
+         J.G.Harston, 70 Camm Street, Walkley, Sheffield, S6 3TR
+                    mdfs.net/Software/PDP11/BBCBasic
+                            Date: 10-May-2025
+
+This is a PDP11 implementation of the BBC BASIC programming language. It
+implements BBC BASIC IV, with a few additions from BBC BASIC V.
+
+Communication with the host system is via Unix TRAP, RT11/RSTS EMT or Tube
+EMT instructions.
+
+BBC BASIC is started with 'bbcbasic', 'RUN BASIC' or 'BASIC'. *QUIT will
+return to the calling process, *HELP will report the current host interface
+version.
+
+A filename may be passed on the command line, where it is loaded and run as
+though CHAINed. If the first byte of a loaded file is '#' any following
+bytes up to a control character are ignored, and any following data is
+loaded as untokenised program code. This allows a text file to start with,
+for example:
+
+    #! bbcbasic
+
+On Unix you can pipe the output through a supplied 'ansi' command which will
+translate output sequences to ANSI terminal control sequences, for example:
+
+    bbcbasic | ansi
+
+Calls to BBC MOS entries at &FF00-&FFFF are translated to appropriate host
+calls. [NOP] assembles a &A0 to identify the CPU as a PDP11.
+

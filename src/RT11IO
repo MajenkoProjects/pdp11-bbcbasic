@@ -1,0 +1,1564 @@
+; > RT11IO
+; Interface to RT11 host system
+; ------------------------------
+; Interfaces to any host that implements RT11 EMTs, such as RSTS and UKNC
+
+; To do: BGET, BPUT, PTR, EXT, EOF
+; To do: trap Ctrl-C, Ctrl-P, Ctrl-Q, Ctrl-S.
+; Found basic docs on UKNC graphics control.
+; Graphics will need work-arounds for UKNC, maybe fork into seperate graphics version.
+; BUG: *. still sometimes bombs out on UKNC when followed by LOAD/CHAIN. - seems not
+; to be a problem now that memory area is aligned.
+
+; 01-Jan-2014 Initial RT11 host interface.
+; 25-May-2020 OPENIN works.
+; 27-May-2020 LOAD works calling OPENIN.
+; 29-May-2020 OPENOUT works, SAVE works calling OPENOUT.
+; 31-May-2020 ANSI VDU driver, UNKC VDU driver.
+; To do: work out command line passing, QUIT passes line back to monitor.
+; Note: <esc>[B (down) doesn't work after terminal has scrolled. Maybe keep track of
+;  last char and do raw LF if CR/LF or LF/CR sequence.
+; 20-Jun-2020 Added *ESC (ON|OFF), merged ANSI and UKNC VDU driver code.
+; 22-Jun-2020 RT11 and UKNC extended key handler working, initial INKEY() code.
+; 30-Jun-2020 Optimised extended keypress reading.
+; 12-Jul-2020 Added delay to TTYtest to cope with telnet delays.
+; 12-Sep-2021 Added Escape ticker, fast TTYIN check for Escape testing.
+; 28-Dec-2021 UKNC uses faster colour setting, MODE implemented.
+;             GETKEY swallows <lf> after <cr>, faster Escape check, tweeked GETtty.
+;             Tweeks to VDU 127,8,9,10,11.
+; 31-Dec-2021 Cursor control select appropriate VT52 or VT100 control sequences.
+;             Avoids sending colours to VT52. Tweeking Escape polling.
+; 05-Jan-2022 RT11 <esc> doesn't lose characters, sent via vduraw, tweeked Escape.
+; 19-Jan-2022 UKNC reads 8-bit chars from CONIN.
+; 28-Sep-2022 UKNC should be able to read POS/VPOS/MODE from VDU system, but can't
+;             work out how to, so in interim fakes via local variables.
+; 01-Aug-2023 Optimised IO_RDCH, IO_WRCH entries, rewrote TTYIN routines.
+; 02-Aug-2023 ANSI keyboard processing seperated out into seperate module.
+; 15-Sep-2023 Munged VDU10 and VDU 11 to work on various terminals.
+; 01-Mar-2024 shell() calls a command via EXIT and and returns, so *. works.
+;             NB: Odd dependencies in ShellCont - take care with modifying.
+;             Tweeked tests for VT52/UKNC for RT11v5.7 on UKNC. If started with
+;             drv:BASIC looks for BASIC on current drive.
+; 18-Mar-2024 Padding to made data space multiple of 512 bytes for shell().
+; 27-Mar-2024 Optimise IO_xxx entries, all errors generate errors.
+
+
+; Console Input settings
+; ----------------------
+; May be delays between incoming characters so need to pause after
+; receiving <esc> to tell apart <esc> <nochar> and <esc> <char>.
+.KBD_TICK	equ 000		; Foreground Escape key ticker
+;.KBD_DELAY	equ 180		; Delay loop to confirm <nochar> after <esc>
+;.KBD_DELAY	equ 1		; Delay loop to confirm <nochar> after <esc>
+.KBD_DELAY	equ 180		; Delay loop to confirm <nochar> after <esc>
+; Testing with puTTY needs at least 160
+
+; SV_SYS flag settings
+; --------------------
+.FLG_BIT3	equ &08
+.FLG_BIT2	equ &04
+.FLG_BIT1	equ &02
+.FLG_BIT0	equ &01
+
+; Initialise Host I/O system
+; ==========================
+; On entry, &14A=command line, terminated with 0
+;           r5=&0BBC for BBC environment or <>&0BBC otherwise
+;    not UKNC                                  UKNC
+; r0=&41A2                                  r0=&41A4
+; r1=&0044                                  r1=&005D
+; r2=&0200 stack top                        r2=&0200 stack top
+; r3=&8600                                  r3=&9200
+; r4=&BBA4                                  r4=&AFA4
+; r5=&B764 top of available memory          r5=&CB12
+; r6=&01FE initial stack                    r6=&01FE initial stack
+;
+; On exit,  r0=bottom of memory
+;           r1=top of memory
+;
+.IO_Init
+clr  SV_SYS		; No embedded code
+mov  #&014A,r1		; R1=>parameter buffer
+adr  SV_STRING,r2	; R2=>string buffer
+.IO_InitLp1
+movb (r1)+,(r2)+	; Copy characters
+bne  IO_InitLp1		; Loop until &00 byte
+movb #13,-1(r2)		; Store terminating <cr>
+;
+mov #8,r0
+mov #RT_HANDLES,r1
+.IO_InitLp2
+clr (r1)+		; Clear all handles
+dec r0
+bne IO_InitLp2
+clr vduQ		; Clear VDU and KBD queues
+clr RT_POSVPOS
+;mov #79+256*24,RT_WIDTH ; Display is 80x25 characters
+mov #79+256*23,RT_WIDTH ; Display is 80x24 characters
+#if UKNCOK<0
+ tst @#UKNCADDR		; Look inside host's workspace
+ beq IO_Init3		; EQ=not UKNC
+#else
+ cmp @#UKNCADDR,#UKNCOK	; Look inside host's workspace
+ bne IO_Init3		; NE=not UKNC
+#endif
+;decb RT_HEIGHT		; Set UKNC screen size
+mov #UKNkeys,r0		; Initialise function keys
+emt &E9
+.IO_Init3
+#if KBD_TICK=0
+ clrb SV_TICKER		 ; Reset Escape ticker
+#else
+ movb #KBD_TICK,SV_TICKER; Reset Escape ticker
+#endif
+clr -(sp)
+mov sp,-(sp)
+mov #&o35*256+0,-(sp)
+mov sp,r0
+emt &o375		; Disable Ctrl-C
+add #6,sp
+mov #4*256+0,r0 	; SERR
+emt &o374		; Soft errors
+
+; Return memory limits
+; --------------------
+mov #&FFFE,r0		; Maximum possible value
+emt &o354		; SETTOP - Request memory up to &FFFE
+mov r0,r1		; r1=top of memory
+bic #&00FF,r1		; Round down to &xx00 for space for shell()
+adr DefaultPAGE,r0	; r0=bottom of memory
+mov r1,SV_MEMTOP
+mov r0,SV_MEMBOT
+cmp SV_STRING,#ASC"$"+256*ASC"."
+beq ShellCont		; Special return from shell()
+rts pc
+
+
+; IO entry points
+; ===============
+.IO_CLI		EQU IO_OSCLI		; Execute command
+
+; OSQUIT - Quit execution
+; =======================
+; On entry, R0=exit status
+;
+.IO_QUIT0
+.IO_QUIT		; RT11 requires R0=0
+CLR R0			; Quit with status=0
+bisb #&o10,&o53 	; Signal 'failure/hard exit' - don't execute any command
+;bisb #&o01,&o53 	; Signal 'success' - looks for command to execute
+;clr  &o510
+emt  &o350		; EXIT, NB RT11 requires R0=0
+rts  pc			; In case returns
+
+
+; Command doesn't match or */name, pass to shell()
+; ------------------------------------------------
+; r0=>start of command name
+; sp=>saved R1
+.IO_CLIslash
+.IO_Shell
+cmpb (r0),#ASC"."
+bne  CLIerrorR1			; Not *. so bomb out
+;bne  Shell1			; Not *. so skip
+adr  ShellCat,r0		; r0=>"dir/vol/exc %.%"
+.Shell1
+mov  r5,-(sp)			; Save LPTR
+mov  sp,SV_SYSPTR		; Stack to restore
+mov  r2,-(sp)
+mov  r0,-(sp)			; Save =>command
+;
+; Need to work out how to save code image
+mov  #ShellRerun,FILE_NAME	; Save a copy of BASIC code
+clr  FILE_START+0		; start=&0000
+clr  FILE_START+2
+mov  #DataEnd,FILE_END+0	; end=end of init'd data
+clr  FILE_END+2
+adr  MOS_BUF,r1 		; r1=>control block
+mov  #1,r0			; r0=SAVE+1 for RT_FILE entry
+;jsr  pc,RT_FILE 		; Call OSFILE to save
+;
+mov  #ShellName,FILE_NAME	; Save a copy of live data
+mov  #SV_VARS,FILE_START+0	; start=interpreter variables
+clr  FILE_START+2
+mov  SV_MEMTOP,FILE_END+0	; end=MEMTOP
+clr  FILE_END+2
+adr  MOS_BUF,r1			; r1=>control block
+mov  #1,r0			; r0=SAVE+1 for RT_FILE entry
+jsr  pc,RT_FILE			; Call OSFILE to save
+;
+mov  (sp)+,r0			; r0=>command
+mov  #&o512,r1			; r1=>command buffer
+jsr  pc,ShellCopy
+adr  ShellReturn,r0		; r0=>"run x.x"
+jsr  pc,ShellCopy
+sub  #&o512,r1
+mov  r1,&o510			; Length of command buffer
+clr  &o52			; USRERROR=0
+bisb #32,&o44			; EXTCHAIN=TRUE
+clr  r0				; Exit=Ok
+emt  &o350			; EXIT
+
+; Return from EXIT, restore interpreter
+; *NB* RAND will be set to zero
+; *TODO* Delete $.$ file
+.ShellCont
+adr  MOS_BUF,sp			; Temp'y stack under MOS_BUF
+mov  #ShellName,FILE_NAME
+mov  #SV_VARS,FILE_LOAD+0	; load=interpreter variables
+clr  FILE_LOAD+2
+clr  FILE_LOAD+4		; load to supplied address
+clr  r0				; r0=LOAD+1 for RT_FILE entry
+adr  MOS_BUF,r1 		; r1=>control block
+;mov  sp,r1			; r1=>control block *NB* doesn't like this
+jsr  pc,RT_FILE			; Call OSFILE to load
+;jsr  pc,PrintInline		; *NB* Without this, bombs out with
+;equs " ",11,13,0		; HALT instruction.
+;align				; Think this was because of unaligned code
+mov  SV_SYSPTR,sp		; Restore stack
+mov  (sp)+,r5			; Restore LPTR
+mov  (sp)+,r1			; Restore registers
+rts  pc				; And return
+;
+;
+.CLIerrorR1
+mov  (sp)+,r1		; CS, error occured, restore R1
+.CLIchdir
+.errBadCommand
+;adr  msgBadCommand,r0
+;jmp ErrorHandler
+jsr pc,Error
+;.msgBadCommand
+equb 254,"Bad command",0
+align
+
+.ShellCopy
+movb (r0)+,r2		; Copy to command buffer
+movb r2,(r1)+
+cmpb r2,#ASC" "
+bcc  ShellCopy		; *TODO* Check length
+rts  pc
+
+.ShellCat	equs "dir/vol/exc %.%",0
+;.ShellReturn	equs "run x.x "
+.ShellReturn	equs "run basic "
+.ShellName	equs "$.$",13
+.ShellRerun	equs "x.x",13
+align
+
+
+; OSBYTE - Host calls with byte parameters
+; ========================================
+.IO_BYTE
+tst  r0
+beq  IO_BYTE0
+cmp  r0,#&87
+beq  IO_MODE            ; =MODE
+cmp  r0,#&86
+beq  IO_POSVPOS         ; =POS, =VPOS
+cmp  r0,#&81
+beq  IO_INKEY		; =INKEY
+cmp  r0,#&80
+beq  IO_ADVAL		; =ADVAL
+cmp  r0,#&7F
+beq  IO_EOF		; =EOF
+.RT11_BYTEexit
+clv
+rts  pc
+
+; Read host system type
+; ---------------------
+.IO_BYTE0
+mov  #32+11,r1		; 32=DOS-y filing system, 11=DEC PDP11 OS
+rts  pc
+
+.IO_POSVPOS
+.IO_MODE
+asl  r0			; Index into VDUvars
+mov  RT_POSVPOS-&86*2(r0),r1
+asr  r0			; Restore R0
+mov  r1,r2		; Return R1=word.lo, R2=word.hi
+swab r2
+bic  #&FF00,r1
+bic  #&FF00,r2
+rts  pc
+
+; OSINKEY - Timed wait for character from input stream
+; ====================================================
+; On entry, R1=timeout
+; On exit,  R1=character
+;           CC=ok
+;           CS=escape or timeout
+;           R1=27        R1=-1
+;
+.IO_INKEY
+tst  r1			; Negative INKEY?
+bmi  IO_INKEYneg	; INKEY -num with R1=&FFxx
+jsr  pc,IO_GETKEY0	; Should test for waiting key
+;bvc  IO_INKEYdone
+; Should test timeout
+;mov  #&FFFF,r0		; No key pressed
+;sec			; No key pressed
+.IO_INKEYdone
+mov  r0,r1		; Return keypress in R1
+mov  #&89,r0		; Restore R0
+rts  pc
+;
+; Read machine type
+; -----------------
+.IO_INKEYneg
+clr  r0			; Prepare 'key not pressed'
+cmp  r1,#&FF00
+bne  IO_INKEYdone	; Not INKEY-256
+mov  #&B0,r0		; R0=&B0 - PDP11 generic
+#if UKNCOK<0
+ tst  @#UKNCADDR	; Look inside host's workspace
+ beq  IO_INKEYdone	; EQ=not UKNC
+#else
+ cmp  @#UKNCADDR,#UKNCOK ; Look inside host's workspace
+ bne  IO_INKEYdone	 ; NE=not UKNC
+#endif
+inc  r0			; R0=&B1 - PDP11 UKNC
+br   IO_INKEYdone	; Should distinguish between DOS11/RSX11/RSTS/RT11/UKNC
+
+; =ADVAL
+; ------
+.IO_ADVAL
+;cmpb r1,#255
+;beq  IO_ADVALkbd	; ADVAL(-1)
+cmp  r1,#127
+bne  RT11_BYTEexit	; Not ADVAL(128-1), exit
+.IO_ADVALlp
+jsr  pc,KBD_GETKEYBUF	; Wait for deep keypress
+mov  r0,r1
+rts  pc
+
+; Read EOF status
+; ---------------
+.IO_EOF
+tst  r1
+bne  IO_EOFdone		; Not EOF#0
+jsr  pc,KBD_TestKey
+clr  r1			; Prepare 'More input pending'
+tst  r0			; How many keypresses pending?
+bne  IO_EOFdone		; If pend<>0, return EOF=FALSE
+dec  r1			; If pend=0, return EOF=TRUE
+.IO_EOFdone
+rts  pc
+
+
+; OSWORD - Host calls with parameters in control block
+; ====================================================
+; On entry, R0=action
+;           R1=>control block
+; On exit,  All registers undefined
+;
+;  0 - Read line
+;  1 - Read TIME
+;  2 - Write TIME
+;  3 - Read SYSTIME
+;  4 - Write SYSTIME
+;  5 - Read from memory
+;  6 - Write to memory
+;  7 - SOUND
+;  8 - ENVELOPE
+;  9 - POINT
+; 10 - Character definition
+; 11 - Read palette
+; 12 - Write palette
+; 13 - Read graphics positions
+; 14 - Read TIME$
+; 15 - Write TIME$
+.IO_WORD
+cmp  r0,#1
+beq  RT_WORD1		; OSWORD 1 - Read TIME
+bcc  RT_NOTWORD
+JMP  IO_WORD0		; OSWORD 0 - Read line
+
+; Read TIME
+; ---------
+.RT_WORD1
+; On entry, R1=>block to read time to
+; On exit,  R1=>5-byte centisecond time
+;
+mov  r4,-(sp)
+mov  r3,-(sp)
+mov  r2,-(sp)
+mov  r1,-(sp)		; Save registers
+jsr  pc,IO_ReadTime	; Get 1/50s count
+clr  r2
+asl  r0			; Multiply by 2, convert to 1/100s
+rol  r1
+;rol  r2		; b32
+clr  r2			; Reduce to 32-bit value
+mov  r1,r3		; b16-b31
+mov  r0,r4		; b0-b15
+mov  (sp),r1		; r1=>control block
+mov  #5,r0		; 5 bytes
+jsr  pc,cmdAssignNumber1 ; Store r4/r3/r2 in memory at r1
+mov  (sp)+,r1		; Restore registers
+mov  (sp)+,r2
+mov  (sp)+,r3
+mov  (sp)+,r4
+mov  #1,r0
+.RT_NOTWORD
+rts  pc
+;
+.IO_ReadTime
+mov  #RT_STACK,r0
+mov  sp,(r0)		; Save SP
+mov  r0,sp		; Use internal stack
+cmp  -(sp),-(sp)	; Make room on stack
+mov  sp,-(sp)		; Stack address of space on stack
+mov  #&o21*256+0,-(sp)	; GETTIM - Get Time
+mov  sp,r0
+emt  &o375
+cmp  (sp)+,(sp)+	; Drop command and address
+mov  (sp)+,r1		; Get 50Hz/60Hz tick to r1:r0
+mov  (sp)+,r0
+mov  (sp),sp		; Restore SP
+rts  pc
+
+
+; OSASCI, OSNEWL, etc - Output with newline to output stream
+; ==========================================================
+.IO_ASCI
+CMP  R0,#13		; Print ASCII character
+BNE  IO_WRCH		; Not <cr>, output it
+.IO_NEWL
+MOV  #10,R0		; Output <lf><cr>
+JSR  PC,IO_WRCH
+.IO_WRCR
+MOV  #13,R0		; Output <cr>
+			; Fall through to...
+
+; OSWRCH - Output character to output stream
+; ==========================================
+; On entry, R0=character
+; On exit,  all registers preserved
+;
+.IO_WRCH
+mov  r0,-(sp)
+mov  r1,-(sp)
+jsr  pc,wrch
+mov  (sp)+,r1
+mov  (sp)+,r0		; Also clears V
+rts  pc
+
+
+; OSRDCH - Wait for character from input stream
+; =============================================
+; On exit,  R0=character
+;           CC=not escape, CS=escape
+;
+;.IO_RDCH
+;jsr  pc,IO_GETKEY0	; Test for waiting key
+;bvs  IO_RDCH		; Loop until key pressed
+;rts  pc
+
+; Read from keyboard input
+; ------------------------
+; On exit: VS=No keypress (not yet implemented)
+;          VC=Key press returned
+;            R0=16-bit character code
+;            CC=Not Escape
+;            CS=Escape and ESCFLG set
+;
+.IO_RDCH
+.IO_GETKEY0
+tstb SV_ESCFLG		; Pending Escape state?	; V cleared, C cleared
+bmi  IO_GETKEYesc	; Escape pending
+jsr  pc,KBD_GETKEYBUF	; Read from keyboard
+bic  #&FF00,r0		; Ensure 8-bit keycode	; V cleared, C unchanged
+bitb #FLG_ESCAPE,SV_SYS	; Is Escape disabled?	; V cleared, C unchanged
+bne  IO_GETKEYdone	; If Escape disabled, return
+cmp  r0,#27		; Check for CHR$27	; V unknown, C unknown
+clc			;			; V cleared, C cleared
+bne  IO_GETKEYdone	; Return CC if not CHR$27
+movb #&FF,SV_ESCFLG	; Set Escape flag
+.IO_GETKEYesc
+sec			; CS=Escape
+jmp  KBD_GETKEYesc	; Return R0=27
+
+
+; OSBGET - Read a single byte
+; ===========================
+; On entry, R1=handle
+; On exit,  R0=byte read
+;
+; We need to maintain a buffer and PTR/EXT
+;
+.RT11_BGET
+cmp #16,r1
+bcs RT11_BGETexit	; Out or range, return EOF
+mov sp,@#RT_STACK	; Save SP
+mov #RT_STACK,sp	; Use local stack
+;
+;mov #-1,-(sp)		; Not BMODE
+mov #1,-(sp)		; Not BMODE
+mov #1,-(sp)		; One word
+mov #RT_INFO,-(sp)	; Data buffer
+mov #0,-(sp)		; PTR
+bis #8*256,r1		; R1=READ,<channel>
+mov r1,-(sp)
+mov sp,r0		; R0=>parameters
+emt &o375
+mov (sp)+,r0		; Get READ,<channel> back
+bic #&FF00,r0		; R1=WAIT,<channel>
+emt &o374		; WAIT
+tst (sp)+		; Drop PTR
+mov (sp)+,r0		; Get BUF
+movb (r0),r0		; Get byte from buffer
+;
+mov #RT_STACK,sp	; Get old stack
+mov (sp),sp
+.RT11_BGETexit
+clv
+.IO_GETKEYdone
+;rts pc
+
+.IO_GBPB
+.IO_BPUT
+.IO_BGET
+.IO_ARGS
+rts pc
+
+
+; OSFIND - Open/close a file
+; ==========================
+; On entry, close: R0=0, R1=handle
+;           open:  R0<>0, R1=>filename
+; On exit,  close: all preserved
+;           open:  R0=handle
+;                  R1 preserved
+;
+.IO_FIND
+tst  r0
+bne  RT_OPEN		; R0<>0, open file
+cmp  r1,#16
+bcc  RT_CLOSEexit	; Handle out of range
+.RT11_CLOSE
+mov  r1,r0
+;beq UX_CLOSEall	; to do: close all
+bis  #6*256,r0		; R0=CLOSE,<channel>
+emt  &o374		; CLOSE
+clrb RT_HANDLES(r1)	; Release the handle
+clr  r0			; Restore R0
+.RT_CLOSEexit
+rts  pc
+
+.RT_OPEN
+mov r2,-(sp)		; Save R2
+mov r1,-(sp)		; R1=>filename
+mov r0,-(sp)		; Save OPEN action
+mov #RT_FNAME,r2	; R2=>buffer for file block
+jsr pc,R50ScanFilename	; Convert filename at R1 to file block at R2
+bcs errBadFilename
+mov (sp),r1		; R1=OPEN action
+;
+mov #RT_STACK,r0
+mov sp,(r0)		; Save SP
+mov r0,sp		; Use internal stack
+;
+mov #RT_INFO,r0		; r0=>block to return file info
+clr (r0)		; Clear info
+mov r0,-(sp)		; (sp)=>returned info area
+mov r2,r0		; r0=>filename block
+EMT &o342		; DSTATUS
+mov #RT_INFO,r0		; r0=>file info
+clc			; Prepare for later test
+mov (r0),r0		; Get device info
+beq RT_FINDexit		; Device not found, return R0=0
+;
+jsr pc,ChannelFind
+bcs errTooManyOpen	; Run out of channels
+bis #1*256,r0		; R0=&01,<channel> - LOOKUP
+clr -(sp)		; seqnum
+bit #&40,r1		; Is is OPENIN/OPENUP?
+bne RT_OPEN2		; Jump to do LOOKUP
+clr -(sp)		; len
+add #1*256,r0		; R0=&02,<channel> - ENTER
+.RT_OPEN2
+mov r2,-(sp)		; dblk
+mov r0,-(sp)		; LOOKUP,channel
+mov sp,r0		; R0=>request block
+emt &o375		;  LOOKUP area,chan,dblk,[seqnum]
+;			or ENTER  area,chan,dblk,len,[seqnum]
+bcs RT_FINDexit
+mov (sp),r0		; R0=channel
+;
+.RT_FINDexit
+rol r0			; Save Carry
+mov #RT_STACK,sp	; Get old stack
+mov (sp),sp
+tst (sp)+		; Drop R0 - clears Carry!
+mov (sp)+,r1		; Restore R1
+mov (sp)+,r2		; Restore R2
+ror r0			; Get Carry back
+bcs RT_FINDfail		; CS+<>0 - already open, CS+0 - file not found
+bic #&FFF0,r0		; Reduce channel to 1-15
+movb r0,RT_HANDLES(r0)	; Claim the handle
+.RT_FINDzero
+rts pc			; Return R0=channel
+;
+.RT_FINDfail
+tst r0
+beq RT_FINDzero		; R0=0, not found, return 0
+adr msgAlreadyOpen,r0	; R0=>error block
+jmp ErrorHandler
+
+.errTooManyOpen
+mov #RT_STACK,sp	; Get old stack
+mov (sp),sp
+adr msgTooMany,r0	; R0=>error block
+jmp ErrorHandler
+
+.errBadFilename
+adr msgBadFilename,r0	; R0=>error block
+jmp ErrorHandler
+
+; Find a free channel
+; -------------------
+; On exit, CC, R0=channel
+;          CS, run out of channels
+;
+.ChannelFind
+mov  #4,r0		; Start at channel 4
+.ChannelFindLp
+inc  r0			; Step to next channel
+cmp  #15,r0		; Run out of channels?
+bcs  ChannelFindExit	; Exit with CS
+tstb RT_HANDLES(r0)	; Test if channel is closed
+bne  ChannelFindLp	; Not closed, loop to test next one
+.ChannelFindExit
+rts  pc
+
+.errBadAddress
+jsr  pc,Error
+.msgBadAddress
+equb 252,"Bad address",0
+.msgBadFilename
+equb 204,"Bad filename",0
+.msgAlreadyOpen
+equb 194,"Already open",0
+.msgTooMany
+equb 192,"Too many open",0
+.msgFileNotFound
+equb 214,"File not found",0
+align
+
+
+; OSFILE - Load/save/info on whole files
+; ======================================
+; On entry, R0=action
+;           R1=>control block
+; On exit,  Control block updated
+;
+.IO_FILE
+incb r0
+cmp  r0,#2
+bcs  RT_FILE		; 0/1 -> Load/Save
+decb r0			; Restore R0
+rts  pc
+;
+; OSFILE &FF/&00 - Load/Save file
+; -------------------------------
+.RT_FILE
+#ifdef DEBUG
+ mov  r5,-(sp)		; Save this if Debug called
+#endif
+mov  r4,-(sp)
+mov  r3,-(sp)
+mov  r2,-(sp)
+mov  r1,-(sp)
+mov  r1,r2		; r2=>control block
+mov  r0,r4		; r4=0/1 -> Load/Save
+
+; Get filename and open file
+; --------------------------
+bne  RT_NotLoad
+tstb 6(r2)
+bne  errBadAddress	;  No address supplied, RT11 doesn't have file address, error
+.RT_NotLoad
+jsr  pc,FetchWord	; r1=>fname, r0=corrupted, r2=r2+4
+			; R4=%00000000=Load    %00000001=Save
+dec  r4			; R4=%11111111         %00000000
+mov  #&0080,r0
+xor  r4,r0		; R0=%01111111         %10000000
+bic  #&FF3F,r0		; R0=%01000000=OPENIN  %10000000=OPENOUT
+jsr  pc,RT_OPEN		; Open file
+tst  r0
+beq  RT_FILENotFound	; File not found
+;
+; Get start address and length, do read/write
+; -------------------------------------------
+mov  (sp),r2		; r2=>control block
+mov  sp,@#RT_STACK	; Save SP
+mov  #RT_STACK,sp	; Use local stack
+mov  r0,-(sp)		; Save handle
+;
+add  #2,r2		; r2=>load address
+inc  r4			; Restore r4=0/1 -> Load/Save
+beq  RT_File1		; Load file
+add  #8,r2		; r2=>start address
+.RT_File1
+jsr  pc,FetchWord	; Get load/start address from control block, r2=>next word
+mov  r1,r3		; r3=start address
+mov  @#RT_STACK,r1	; r1=end address, bottom of stack
+sub  r3,r1		; r1=max length to load
+tst  r4
+beq  RT_FileLoad	; R4=0, Load up to bottom of stack
+jsr  pc,FetchWord	; Get end address from control block
+sub  r3,r1		; r1=length to save
+.RT_FileLoad
+mov (sp),r0		; Get handle back
+mov #1,-(sp)		; Not BMODE
+inc r1			; Deal with odd number of bytes
+clc
+ror r1			; num=(num+1)/2, convert bytes to words
+mov r1,-(sp)		; Number of words
+mov r3,-(sp)		; Load or start address
+mov #0,-(sp)		; PTR=0
+bis #8*256,r0		; R0=READ,<channel>
+tst r4
+beq RT_File2		; R4=0, do Load
+bis #9*256,r0		; R0=WRITE,<channel>
+.RT_File2
+mov r0,-(sp)
+mov sp,r0		; R0=>parameters
+emt &o375		; READ/WRITE channel,PTR=0,address,length,notBMODE
+mov r0,r3		; Return R0=count actually transfered
+mov (sp)+,r0		; Get READ/WRITE,<channel> back
+bic #&FF00,r0		; R0=WAIT,<channel>
+emt &o374		; WAIT
+mov r0,r1		; Get handle to r1
+jsr pc,RT11_CLOSE	; Close the file
+;
+; Update control block
+; --------------------
+mov #RT_STACK,sp	; Get old stack
+mov (sp),sp
+;
+mov  r3,r1		; r1=words transfers
+asl  r1			; r1=bytes transfered
+clr  r0			; &r0:r1=length of file
+mov  (sp),r2		; Get address of control block back
+add  #10,r2		; Point to 'length' in control block
+jsr  pc,StoreWord	; Store it in control block
+mov  (sp)+,r1		; Restore all registers
+mov  (sp)+,r2
+mov  (sp)+,r3
+mov  (sp)+,r4
+#ifdef DEBUG
+ mov  (sp)+,r5		; Was protected against Debug calls
+#endif
+mov  #1,r0		; Return 'File found'
+rts  pc
+
+; Error occured during OSFILE
+; ---------------------------
+.RT_FILENotFound
+adr msgFileNotFound,r0	; R0=>error block
+jmp ErrorHandler
+
+
+; Convert Ascii filename to Radix50 name block
+; --------------------------------------------
+; In:  R1=>filename
+;      R2=>output buffer, word aligned
+; Out: R2=>output buffer
+;      R1=>character after filename
+;      R0= character after filename
+;      R3-R6 preserved
+;      CS=filename valid
+;      CC=filename invalid
+;
+.R50ScanFilename
+cmpb (r1)+,#ASC" "
+beq  R50ScanFilename	; Skip leading spaces
+dec  r1			; R1=>first nonspace character
+mov  r3,-(sp)		; Save R3
+jsr  pc,R50ScanThree	; Get up to 3 characters for device
+cmpb r0,#&3A		; Device specifier?
+beq  R50ScanFilename2	; Yes, continue by scanning filename
+;
+; Not a device prefix, we've scanned three chars of filename
+mov -2(r2),(r2)+	; Copy to start of filename
+;clr -4(r2)		; Clear device name
+mov  #(ASC"D"-64)*40*40+(ASC"K"-64)*40,-4(r2)		; Set device name to 'DK:'
+br   R50ScanFilename3	; Scan second half of filename
+;
+; Device name has been scanned, now scan filename
+.R50ScanFilename2
+inc  r1			; Step past colon
+jsr  pc,R50ScanThree	; Get up to 3 characters of filename
+cmp  r0,#ASC"."
+beq  R50ScanFilename4	; Dot, scan extension
+.R50ScanFilename3
+jsr  pc,R50ScanThree	; Get up to 3 more characters of filename
+cmpb r0,#ASC"."		; Extension seperator?
+beq  R50ScanFilename4a	; Yes, step past dot
+clr  (r2)+		; Set extension to spaces
+br   R50ScanFilename6
+;
+.R50ScanFilename4
+clr  (r2)+		; Set second half of filename to spaces
+.R50ScanFilename4a
+inc  r1			; Step past dot
+.R50ScanFilename5
+jsr  pc,R50ScanThree	; Get up to 3 characters of extension
+.R50ScanFilename6
+mov  (sp)+,r3		; Restore R3
+sub  #8,r2		; Point R2 back to start of output buffer
+cmpb #ASC" ",r0		; Are we at end of name?
+rts  pc			; CC=Ok, CS=Bad name
+
+; Scan up to three characters and convert to Radix50
+; --------------------------------------------------
+; In:  R1=>character string
+;      R2=>output buffer
+; Out: R0= next input character
+;      R1=>next input character
+;      R2=>next output buffer byte
+;
+.R50ScanThree
+clr  (r2)		; Set current word to three spaces
+mov  #3,r3		; Prepare to scan three characters
+.R50ScanThreeLoop
+movb (r1)+,r0		; Get character
+jsr  pc,R50NameChar	; Test it for valid R50 character
+bcs  R50ScanThreeEnd	; Invalid character, pad to end
+jsr  pc,R50Times40	; Multiply by 40 and add
+dec  r3
+bne  R50ScanThreeLoop	; Loop for up to three characters
+inc r1
+br   R50ScanThreeDone	; All three done
+.R50ScanThreeEnd
+jsr  pc,R50Times40Zero	; Multiply by 40 to pad with spaces
+dec  r3
+bne  R50ScanThreeEnd	; All three done
+.R50ScanThreeDone
+movb -(r1),r0		; Get terminating character
+tst  (r2)+		; Step to next output word
+rts  pc
+
+.R50Times40Zero
+clr  r0
+.R50Times40
+mov  r0,-(sp)		; Save this index
+mov  (r2),r0
+asl  r0			; *2
+asl  r0			; *4
+add  (r2),r0		; +1 -> *5
+asl  r0			; *10
+asl  r0			; *20
+asl  r0			; *40
+add  (sp)+,r0		; num=num*40+this
+mov  r0,(r2)		; Store in output buffer
+rts  pc
+
+; Check for Valid R50 character
+; -----------------------------
+; In:  R0=character, case ignored
+; Out: CC=valid character     R0=R50 index
+;      CS=invalid character   R0=preserved or upper case
+; Valid characters are " abcdefghijklmnopqrstuvwxyz$%*0123456789"
+; But filenames are terminated by space, so ' ' rejected.
+;
+.R50NameChar
+cmpb r0,#ASC"$"
+beq  R50Char27		; Convert '$' -> 27
+cmpb r0,#ASC"%"
+beq  R50Char28		; Convert '%' -> 28
+cmpb r0,#ASC"*"
+beq  R50Char29		; Convert '*' -> 29
+jsr  pc,VarChkChar	; Check if 0-9,A-Z,_,`,a-z
+bcs  R50BadChar
+.R50Dot
+bic  #&FFA0,r0		; Force to A-Z,_,`,a-z to &40-&5F, 0-9 to &10-&19
+cmpb #ASC"Z",r0
+bcs  R50BadChar
+cmpb #ASC"@",r0
+bcs  R50Alpha		; Reduce letters to 1-26
+sec
+beq  R50BadChar
+add  #&4E,r0		; Offset for 0-9 -> 30-39
+.R50Alpha
+sub  #ASC"@",r0		; A-Z -> 1-26, 0-9 -> 30-39
+.R50BadChar
+rts  pc
+.R50Char29
+mov  #38,r0
+.R50Char28
+.R50Char27
+sub  #9,r0		; Convert to 27,28,29
+rts  pc
+
+
+; CONSOLE INPUT
+; ~~~~~~~~~~~~~
+
+; Check for Escape state
+; ----------------------
+;.IO_EscapeFast
+;movb #1,SV_TICKER	; Bypass ticker
+.IO_Escape
+tstb SV_ESCFLG		; Check local Escape flag
+bmi  errEscape		; Background Escape pending
+bitb #FLG_ESCAPE,SV_SYS	; Is Escape disabled?
+bne  IO_NoEscape	; Don't test for Escape
+decb SV_TICKER		; Only test Escape every so often
+bne  IO_NoEscape
+#if KBD_TICK=0
+ clrb SV_TICKER		  ; Reset Escape ticker, clear Cy
+#else
+ movb #KBD_TICK,SV_TICKER ; Reset Escape ticker
+#endif
+.IO_EscapeFast		; Bypass ticker
+CMP  #VT52OK,@#VT52ADDR	; CC=VT52, CS=VT100
+BCS  IO_EscapeNotVT52
+CMPB @#&o177562,#27	; Read TTYIN directly
+BNE  IO_NoEscape	; Mustn't read TTYSTAT first as that flushes TTYIN
+.IO_EscapeFlushVT52
+emt  KBDEMT
+bcs  IO_EscapeFlushVT52	; Pull character from TTYIN
+br   errEscape		; Generate error
+
+.IO_EscapeNotVT52
+emt  KBDEMT
+bcs  IO_NoEscape	; No key pressed
+cmp  r0,#27
+bne  IO_NoEscape	; Not <esc>, lose the keypress
+emt  KBDEMT		; TTYIN - might need to be delayed TTYIN call
+bcs  errEscape		; <esc> <nochar> -> Escape pressed
+.IO_NoEscape		; <esc> <something> - lose the keypresses
+rts  pc
+
+.errEscape
+emt  KBDEMT
+bcc  errEscape		; Flush TTYIN
+clrb SV_KBDQ		; Clear pending keypresses
+jsr  pc,Error		; Generate Escape error
+equb 17,"Escape",0
+align
+
+.KBD_TestKeyLp
+movb r0,SV_KBDBUF	; Buffer the keypress
+incb SV_KBDQ		; Inc. queue and continue to return NE
+;
+.KBD_TestKey
+; On exit, EQ+R0=0 - no key waiting
+;          NE+R0>0 - keypress waiting
+movb SV_KBDQ,r0
+bne  KBD_TestKeyOk	; Buffered keypress
+emt  KBDEMT		; TTYIN
+bcc  KBD_TestKeyLp	; Pending keypress, buffer it
+clr  r0			; No keypress, return R0=0+EQ
+.KBD_TestKeyOk
+rts  pc
+
+.KBD_WaitKey
+; On exit, R0=keypress
+movb SV_KBDQ,r0
+beq  KBD_WaitKeyLp	; No pending keypress
+movb SV_KBDBUF-1(r0),r0	; Get pending keypress
+decb SV_KBDQ		; Clears Cy
+rts  pc
+.KBD_WaitKeyLp
+emt  KBDEMT		; TTYIN
+bcs  KBD_WaitKeyLp
+rts  pc
+
+.KBD_TestKeyDelay
+; On exit, EQ+R0=0 - no key waiting
+;          NE+R0>0 - keypress waiting
+mov  r1,-(sp)
+mov  #KBD_DELAY,r1	; Loop to allow for typing delays
+#if UKNCOK<0
+ tst  @#UKNCADDR        ; Look inside host's workspace
+ beq  KBD_SlowKeyLp	; EQ=not UKNC
+#else
+ cmp  @#UKNCADDR,#UKNCOK ; Look inside host's workspace
+ bne  KBD_SlowKeyLp	; NE=not UKNC
+#endif
+mov  #1,r1		; Two passes for UKNC
+.KBD_SlowKeyLp
+jsr  pc,KBD_TestKey
+bne  KBD_SlowKeyOk
+dec  r1
+bpl  KBD_SlowKeyLp
+clr  r0			; R0=0 - no key waiting
+.KBD_SlowKeyOk
+mov  (sp)+,r1
+tst  r0			; Set EQ from R0
+rts  pc
+
+
+; CONSOLE OUTPUT
+; ~~~~~~~~~~~~~~
+
+; Process output character
+; ------------------------
+.wrch
+MOVB vduQ,R1
+BNE  pending		; VDU queue pending
+;
+CMP  R0,#127		; Update local POS/VPOS
+BEQ  wrchLeft
+CMP  R0,#32
+BCC  wrchRight
+CMP  R0,#13
+BEQ  wrchCR
+CMP  R0,#11
+BEQ  wrchUp
+BCC  wrchNext
+CMP  R0,#9
+BEQ  wrchRight
+BCC  wrchDown
+CMP  R0,#8
+BCS  wrchNext
+.wrchLeft
+DECB RT_POS
+BPL  wrchNext
+MOVB RT_WIDTH,RT_POS
+.wrchUp
+TSTB RT_VPOS
+BEQ  wrchNext
+DECB RT_VPOS
+BR   wrchNext
+.wrchRight
+INCB RT_POS
+CMPB RT_POS,RT_WIDTH
+BLS  wrchNext
+CLRB RT_POS
+.wrchDown
+CMPB RT_VPOS,RT_HEIGHT
+BCC  wrchNext
+INCB RT_VPOS
+BR   wrchNext
+.wrchCR
+CLRB RT_POS
+.wrchNext
+;
+CMP  R0,#32
+BCS  control		; Control character
+CMP  R0,#127
+;BEQ  delete		; CHR$127
+BEQ  vdu127		; CHR$127
+BCC  vdudirect		; CHR$>127, bypass 7-bit filter
+BCS  vduraw		; Fall through with CHR$32-CHR$126
+
+; VDU 127 - Delete
+; ----------------
+.vdu127
+MOV  #32*256+8,R0	; ASCII Delete sequence
+JSR  PC,vduraw		; Send 8
+SWAB R0			; Send 32,8
+;
+.vdutwice
+JSR  PC,vduraw		; Send bottom byte, usually ESC
+.vduswap
+SWAB R0			; Swap to sent top byte
+
+; Send raw character to TTYOUT
+; ----------------------------
+.vduraw
+;.vdu10			; Down
+;.vdu08			; Left
+.vdu13			; CR
+.vdu27			; Escape
+.vduwait
+EMT  225		; TTYOUT
+BCS  vduwait		; loop until done
+.vdureturn
+.vdunull
+RTS  PC
+
+.vdu01			; Print Next, write raw character
+MOVB vduQueue-1,R0	; Get character
+BR   vdudirect
+.vduthree
+JSR  PC,vdudirect	; Send R0 bottom byte, usually ESC
+SWAB R0
+JSR  PC,vdudirect	; Sent R0 top byte, usually &80+nn
+MOV  R1,R0		; Send R1 bottom byte
+.vdudirect
+TSTB @#&o177564		; Write directly to bypass 7-bit filter
+BPL  vdudirect
+MOV  R0,@#&o177566
+RTS  PC
+
+; VDU queue pending
+; -----------------
+.pending
+MOVB R0,vduQueue(R1)	; Store in VDU queue
+INCB vduQ
+BNE  vdureturn		; Waiting for more parameters
+MOVB vduChar,R0		; Get current control character
+ASL  R0
+;.dispatch
+MOV  vduAddr(R0),R1	; R1=dispatch address+parameters
+.dispatch1
+BIC  #&F000,R1		; Mask off parameters
+ADR  wrch,R0		; R0=base of routines
+ADD  R0,R1		; Add offset to routine
+MOVB vduChar,R0		; Get control character
+CMPB R0,#30
+BCC  dispatch2		; CHR$>29, Carry=VT type
+CMPB R0,#16
+BCS  dispatch2		; CHR$<16, Carry=VT type
+#if UKNCOK<0
+ TST  @#UKNCADDR	; Look inside host workspace for UKNC
+ BNE  dispatch3		; NE=UKNC, TST also sets CC
+#else
+ CMP  @#UKNCADDR,#UKNCOK ; Look inside host workspace for UKNC
+ BEQ  dispatch3		 ; CC=UKNC
+#endif
+SEC			; CS=not UKNC
+.dispatch3
+JMP  (R1)		; Jump to control routine
+.dispatch2
+CMP  #VT52OK,@#VT52ADDR	 ; CC=VT52, CS=VT100
+JMP  (R1)		 ; Jump to control routine
+
+; Control characters
+; ------------------
+;.delete
+;MOV  #32,R0		; Convert VDU 127 to 32
+.control
+MOVB R0,vduChar		; Save control character
+ASL  R0
+MOV  vduAddr(R0),R1	; R1=dispatch address+parameters
+BIT  R1,#&F000
+BEQ  dispatch1		; No parameters, dispatch
+SWAB R1
+ASR  R1
+ASR  R1
+ASR  R1
+ASR  R1			; Number of parameters in b0-b3
+BIS  #&F0,R1
+MOVB R1,vduQ		; 256-(Number of params to wait for)
+RTS  PC
+
+;; VDU 127 - Delete
+;; ----------------
+;.vdu127
+;MOV  #32*256+8,R0	; ASCII Delete sequence
+;;BCS  vdu127a
+;;MOV  #32*256+26,R0	; UKNC Delete sequence
+;;.vdu127a
+;MOV  R0,R1
+;BR   vduthree
+
+;ADR  ANSdelete,R0	; ANSI Delete sequence
+;BCS  vdu127a
+;ADR  UKNdelete,R0	; UKNC Delete sequence
+;.vdu127a
+;EMT  &o351		; PRINT
+;RTS  PC
+
+; VDU 8 - Left
+; -------------
+.vdu08
+BCS  vduraw		; CS=VT100
+MOV  #27+256*ASC"D",R0
+BR   vdutwice		; CC=VT52
+
+; VDU 9 - Right
+; -------------
+.vdu09
+MOV  #27+256*ASC"C",R0
+BCC  vdutwice		; CC=VT52
+ADR  ANSright,R0	; ANSI right
+EMT  &o351		; PRINT
+RTS  PC
+
+; VDU 10 - Down
+; -------------
+.vdu10
+BCS  vdu10ansi		; VS=VT100
+#if UKNCOK<0
+ TST  @#UKNCADDR	; EQ=UKNC, NE=not UKNC
+ BNE  vduraw		; UKNC, do VDU 10 for LF
+#else
+ CMP  @#UKNCADDR,#UKNCOK ; EQ=UKNC, NE=not UKNC
+ BEQ  vduraw		 ; UKNC, do VDU 10 for LF
+#endif
+INC  R0
+BR   vduraw		; Not UKNC, do VDU 11 for LF
+.vdu10ansi
+ADR  ANSdown,R0		; ANSI down
+EMT  &o351		; PRINT
+RTS  PC
+
+; VDU 11 - Up
+; -----------
+.vdu11
+MOV  #27+256*ASC"I",R0
+BCC  vdutwice		; CC=VT52
+ADR  ANSup,R0		; ANSI up
+EMT  &o351		; PRINT
+RTS  PC
+
+; VDU 22,n - MODE
+; ---------------
+.vdu22
+MOVB vduQueue-1,R1	; Get MODE parameter
+MOVB R1,RT_MODE		; Save MODE
+;MOV  #79+256*24,RT_WIDTH ; Display is 80x25 characters
+MOV  #79+256*23,RT_WIDTH ; Display is 80x24 characters
+BCS  vdu22ansi
+BIC  #&FFF8,R1		; Reduce to 0-7
+CMP  #2,R1		; 0 1 2 3 4 5 6 7
+ADC  R1			; 0 1 2 4 5 6 7 8
+CMP  #6,R1
+BCC  vdu22a
+MOV  #1,R1		; 0 1 2 4 5 6 1 1
+.vdu22a
+BIC  #&FFFC,R1		; 0 1 2 0 1 2 1 1
+MOVB UKNwidth(R1),RT_WIDTH
+;DECB RT_HEIGHT		; Set UKNC screen size
+ADD  #ASC"1",R1		; 1 2 3 1 2 3 4 2, clears Carry
+MOV  #27+256*166,R0
+JSR  PC,vduthree	; Carry preserved
+.vdu22ansi
+CMP  #VT52OK,@#VT52ADDR	; CC=VT52, CS=VT100
+JSR  PC,vdu20		; Reset colours, Carry preserved
+MOV  #12,R0		; Then clear screen
+
+; VDU 12 - CLS
+; ------------
+.vdu12
+ROR  R1			; Save Carry
+ADR  VT52cls,R0		; CC=VT52 cls (NB, ADR changes Carry)
+TST  R1
+BPL  vdu12go
+ADR  ANScls,R0		; CS=VT100 cls (NB, ADR changes Carry)
+.vdu12go
+EMT  &o351		; PRINT
+ROL  R1			; Get Carry back
+;BCC  vduraw		; UKNC
+;ADR  ANScls,R0		; ANSI cls
+;EMT  &o351		; PRINT
+;SEC			; Then HOME cursor for RT11
+
+; VDU 30     - Home
+; VDU 31,x,y - TAB
+; -----------------
+.vdu30
+MOV  #0,vduQueue-2	; Preload TAB(0,0), preserve Carry
+.vdu31
+MOV  vduQueue-2,RT_POSVPOS
+BCS  ansi31		; CS=VT100
+CMPB vduQueue-2,RT_WIDTH  ; Can't send >95 as 96+128=128
+BHI  ansi31done		  ; Limit the range by checking
+CMPB vduQueue-1,RT_HEIGHT ; limits set from MODE
+BHI  ansi31done
+ADD  #&2020,vduQueue-2	; VT52 starts from (32,32)
+MOV  #27+256*ASC"Y",R0
+JSR  PC,vdutwice	; Send ESC,Y
+MOV  vduQueue-2,R0	; X,Y coordinates
+SWAB R0
+JMP  vdutwice		; Send Y,X
+
+.ansi31
+ADD  #&0101,vduQueue-2	; ANSI starts from (1,1)
+MOV  #ANStab+2,R1
+MOVB vduQueue-1,R0	; Y coordinate
+JSR  PC,vduDecimal	; Output as decimal
+MOVB #59,(R1)+
+MOVB vduQueue-2,R0	; X coordinate
+JSR  PC,vduDecimal	; Output as decimal
+ADR  ANStab,R0		; ANSI tab
+EMT  &o351		; PRINT
+.ansi31done
+RTS  PC
+
+; VDU 17,n - COLOUR - ANSI output
+; -------------------------------
+; PRINTCHR$27;"[0;";
+; IF (A AND 16):PRINT"5;";  :REM flash
+; IF (A AND 32):PRINT"4;";  :REM underline
+; IF (A AND 64):PRINT"7;";  :REM inverse
+; IF (A AND 128)=0:PRINT;30+(A AND 7);";":IF (A AND 8):PRINT"1;";            :REM foreground colour
+; IF (A AND 128)  :PRINT;40+(A AND 7);:IF (A AND 8):PRINT";";100+(A AND 7);  :REM background colour
+; PRINT"m";
+;
+.vdu17
+ROR  R1			; Save Carry in R1
+MOVB vduQueue-1,R0	; Get COLOUR parameter
+BISB #ASC"0",R0		; Convert to digit, keeping b7-b6
+BPL  vdu17_setfgd	; COLOUR &00+n, set foreground
+CMPB R0,#&C0
+BCC  vdu17exit		; COLOUR &C0+n, set border, unimplemented
+MOVB R0,txtBGD		; Set as current background
+BR   vdu17_colour
+.vdu17_setfgd
+MOVB R0,txtFGD		; Set as current foreground
+.vdu17_colour
+TST  R1
+BPL  uknc17_write	; Jump to set UKNC colours
+CMP  #VT52OK,@#VT52ADDR	; CC=VT52, CS=VT100
+BCC  vdu17exit		; CC=VT52, no colours
+;
+MOVB vduQueue-1,R0	; Get COLOUR parameter again
+MOV  #ANScolour+3,R1	; R1=>output string after initial [0
+MOVB #&3B,(R1)+		; Insert semicolon, R1 is now aligned
+BIT  #64,R0
+BEQ  vdu17_noinvert
+MOV  #&3B00+ASC"7",(R1)+; Invert on	"7;"		ALIGNED
+.vdu17_noinvert
+BIT  #32,R0
+BEQ  vdu17_nounderline
+MOV  #&3B00+ASC"4",(R1)+; Underline on	"4;"		ALIGNED
+.vdu17_nounderline
+BIT  #16,R0
+BEQ  vdu17_noflash
+MOV  #&3B00+ASC"5",(R1)+; Flash on	"5;"		ALIGNED
+.vdu17_noflash
+;
+MOVB txtFGD,R0		; Get current foreground
+BIT  #8,R0
+BEQ  vdu17_nobright	; Not bright foreground
+MOV  #&3B00+ASC"1",(R1)+; Bright on	"1;"		ALIGNED
+.vdu17_nobright
+MOVB #ASC"3",(R1)+	; Prefix for foreground		ALIGNED
+BIC  #&FFC8,R0		; Reduce to '0'-'7'
+MOVB R0,(R1)+		; Foreground colour
+MOVB #&3B,(R1)+		;		";"		ALIGNED
+;
+MOVB txtBGD,R0		; Get current background
+MOVB #ASC"4",(R1)+	; Prefix for foreground
+BIC  #&FFC8,R0		; Reduce to '0'-'7'
+MOVB R0,(R1)+		; Background colour		ALIGNED
+BITB #8,txtBGD
+BEQ  vdu17_write	; Not bright background
+MOVB #&3B,(R1)+		;		";"
+MOV  #&3031,(R1)+	; Prefix for bright background	ALIGNED
+MOVB R0,(R1)+		; Bright background colour	ALIGNED
+;
+.vdu17_write
+MOVB #ASC"m",(R1)+	; Terminator
+MOVB #128,(R1)+		; String terminator
+ADR  ANScolour,R0
+EMT  &o351		; PRINT
+;SEC			; CS=ANSI
+.vdu17exit
+RTS  PC
+
+; VDU 20 - Reset colours
+; ----------------------
+.vdu20
+MOV  #&3037,txtFGD	; Set current colours
+BCC  uknc20		; UKNC
+CMP  #VT52OK,@#VT52ADDR	; CC=VT52, CS=VT100
+BCC  vdu20exit		; CC=VT52, no colours
+ADR  ANSreset,R0	; ANSI default colours
+EMT  &o351		; PRINT
+.vdu20exit
+SEC			; SEC=ANSI
+RTS  PC
+
+; VDU 20 - Reset colours
+; ----------------------
+.uknc20
+MOV  #163,R1		; Inverse off
+.uknc20lp
+MOV  #27+256*191,R0
+JSR  PC,vduthree	; Send ESC,191,nnn
+INC  R1
+CMP  #165,R1		; Underline off
+BNE  uknc20lp
+MOVB #64,vduQueue-1	; Set cursor
+JSR  PC,uknc17_write
+ASLB vduQueue-1 	; Set background
+JSR  PC,uknc17_write	; Clears vduQueue-1
+			; fall through
+
+; VDU 17,n - COLOUR - UKNC output
+; -------------------------------
+; COLOUR &00+fgd - PRINT CHR$27;CHR$160;CHR$('0'+fgd);
+; COLOUR &40+cur - PRINT CHR$27;CHR$167;CHR$('0'+cur);
+; COLOUR &80+bgd - PRINT CHR$27;CHR$161;CHR$('0'+bgd);
+; COLOUR &80+bgd - PRINT CHR$27;CHR$162;CHR$('0'+bgd);
+;
+.uknc17_write
+MOV  #27+256*161,R0	; R0=SetBGD
+MOV  txtFGD,R1		; low=FGB, high=BGD
+SWAB R1			; high=FGD, low=BGD
+TSTB vduQueue-1		; Test COLOUR parameter
+BMI  uknc17_go		; COLOUR &80+n
+SWAB R1			; low=FGB, high=BGD
+MOV  #27+256*160,R0	; R0=SetFGD
+BITB #64,vduQueue-1	; Test COLOUR parameter
+BEQ  uknc17_go		; COLOUR &00+n
+MOV  #27+256*167,R0	; R0=SetCursor
+.uknc17_go
+BIC  #&FFF8,R1		; Reduce colour to &00-&07
+MOVB UKNcolourmap(R1),R1 ; Convert to encoded character
+.uknc17_set
+JSR  PC,vduthree	; Send ESC,SetColour,colour
+TSTB vduQueue-1		; Test COLOUR parameter, also clears carry
+BPL  vduDecExit		; Exits with CC=UKNC
+MOV  #27+256*162,R0	; R0=SetSCR
+CLRB vduQueue-1
+BR   uknc17_set
+
+; Output R0 as 8-bit decimal at (R1)
+; ----------------------------------
+.vduDecimal
+MOVB #ASC"0"-1,(R1)	; Start with '0'-1 for hundreds
+.vduDecLp1
+INCB (R1)		; Increment hundreds digit
+SUB  #100,R0		; Subtract 100 from R0
+BCC  vduDecLp1		; Loop until <0
+INC  R1			; Step past hundreds digit
+ADD  #100,R0		; Balance last SUB #100
+MOVB #ASC"0"-1,(R1)	; Start with '0'-1 for tens
+.vduDecLp2
+INCB (R1)		; Increment tens digit
+SUB  #10,R0		; Subtract 10 from R0
+BCC  vduDecLp2		; Loop until <0
+INC  R1			; Step past tens digit
+ADD  #ASC"0"+10,R0	; Convert back to units
+MOVB R0,(R1)+
+.vduDecExit
+RTS PC
+
+; Dispatch addresses and parameters
+; ---------------------------------
+.vduAddr
+EQUW (vduraw -wrch) OR &0000 ; NULL
+EQUW (vdu01  -wrch) OR &F000 ; Print Next
+EQUW (vduraw -wrch) OR &0000 ; Printer On
+EQUW (vduraw -wrch) OR &0000 ; Printer Off
+EQUW (vduraw -wrch) OR &0000 ; Graphics
+EQUW (vduraw -wrch) OR &0000 ; Graphics
+EQUW (vduraw -wrch) OR &0000 ; Enable
+EQUW (vduraw -wrch) OR &0000 ; BELL
+EQUW (vdu08  -wrch) OR &0000 ; Left		VT100/VT52
+EQUW (vdu09  -wrch) OR &0000 ; Right		VT100/VT52
+EQUW (vdu10  -wrch) OR &0000 ; Down		VT100/VT52
+EQUW (vdu11  -wrch) OR &0000 ; Up		VT100/VT52
+EQUW (vdu12  -wrch) OR &0000 ; CLS		VT100/VT52
+EQUW (vdu13  -wrch) OR &0000 ; CR		VT100/VT52
+EQUW (vduraw -wrch) OR &0000 ; Page On  -> Cyrillic characters
+EQUW (vduraw -wrch) OR &0000 ; Page Off -> Latin characters
+EQUW (vduraw -wrch) OR &0000 ; CLG		VT/UKNC
+EQUW (vdu17  -wrch) OR &F000 ; COLOUR		VT/UKNC
+EQUW (vdunull-wrch) OR &E000 ; GCOL		VT/UKNC
+EQUW (vdunull-wrch) OR &B000 ; Set Palette	VT/UKNC
+EQUW (vdu20  -wrch) OR &0000 ; Reset Colours	VT/UKNC
+EQUW (vduraw -wrch) OR &0000 ; Disable VDU
+EQUW (vdu22  -wrch) OR &F000 ; MODE		VT/UKNC
+EQUW (vdunull-wrch) OR &7000 ; DEFCHR$
+EQUW (vdunull-wrch) OR &8000 ; Define Graphics Window
+EQUW (vdunull-wrch) OR &B000 ; PLOT
+EQUW (vdunull-wrch) OR &0000 ; Clear Windows
+EQUW (vduraw -wrch) OR &0000 ; Escape
+EQUW (vdunull-wrch) OR &C000 ; Define Text Window
+EQUW (vdunull-wrch) OR &C000 ; ORIGIN
+EQUW (vdu30  -wrch) OR &0000 ; HOME
+EQUW (vdu31  -wrch) OR &E000 ; TAB		VT100/VT52
+;EQUW (vdu127 -wrch) OR &0000 ; Delete
+
+.CodeEnd		; End of 'text/code' section
+
+; Initialised data
+; ----------------
+;.ANSdelete	EQUS 8,32,8,128			; Delete
+;.ANSleft	EQUS 27,"[D",128		; VT100 Left
+.ANSright	EQUS 27,"[C",128		; VT100 Right
+.ANSdown	EQUS 27,"D",128			; VT100 Down
+;.ANSdown	EQUS 27,"[B",128		; Down, fails on bottom line
+.ANSup		EQUS 27,"M",128 		; Up
+;.ANSup		EQUS 27,"[A",128		; Up, fails on top line
+.ANScls		EQUS 27,"[2J",128		; CLS
+.VT52cls	EQUS 27,"H",27,"J",128		; CLS
+.ANSreset	EQUS 27,"[0m",128		; Default colours
+align
+.ANStab		EQUS 27,"[000,000H",128		; Home/TAB
+align
+.ANScolour	EQUS 27,"[0,1,5,4,7,30,40,100m",128	; COLOUR
+;
+;.UKNdelete	EQUS 26,32,26,128		; Delete
+;.UKNreset	EQUS 27,191,163,27,191,164,0	; Inverse off, Underline off
+;.UKNleft	EQUS 27,"D",128			; Left
+;.UKNright	EQUS 27,"C",128			; Right
+;.UKNdown	EQUS 27,"B",128			; Down
+;.UKNup		EQUS 27,"A",128			; Up
+;.UKNcolour	EQUS 27,"%!0",27,"LI@@"
+;.UKNfgd	EQUS "@@@"
+;.UKNbgd	EQUS "@@@"
+;.UKNcls	EQUS "@",27,"%!3",128
+;.UKNtab	EQUS 27,"Y",128
+.UKNcolourmap	EQUS "04261537"
+.UKNwidth	EQUB 79,39,19,09
+.UKNkeys	EQUS 27,"%!1",27,"P",59,"1|"
+		EQUS "1/1B50",59
+		EQUS "2/1B51",59
+		EQUS "3/1B52",59
+		EQUS "4/1B53",59
+		EQUS "5/1B54",59
+		EQUS "6/1B50",59
+		EQUS "7/1B51",59
+		EQUS "8/1B52",59
+		EQUS "9/1B53",59
+		EQUS "10/1B54",59
+;		EQUS "1/81",59
+;		EQUS "2/82",59
+;		EQUS "3/83",59
+;		EQUS "4/84",59
+;		EQUS "5/85",59
+;		EQUS "6/91",59
+;		EQUS "7/92",59
+;		EQUS "8/93",59
+;		EQUS "9/94",59
+;		EQUS "10/95",59
+		EQUS 27,"\",27,"%!3",128
+;
+align
+.txtFGD		EQUS "7"
+.txtBGD		EQUS "0"
+
+.SV_EMBED
+EQUW 0			; No embedded program
+
+.DataEnd		; End of 'initialised data' section
+BSS			; End of saved portion
+
+; Workspace in low non-swapped memory
+; -----------------------------------
+.RT_HANDLES	EQU	&0100		; 16 handles
+.RT_FNAME	EQU	&0110		; Radix50 filename
+.RT_INFO	EQU	&0118		; File/device status
+.RT_POSVPOS	EQU	&0120		; POS and VPOS
+.RT_POS		EQU	RT_POSVPOS+0
+.RT_VPOS	EQU	RT_POSVPOS+1
+.RT_MODEINF	EQU	&0122		; pad
+.RT_MODE	EQU	RT_MODEINF+1	; MODE
+.RT_WIDTH	EQU	&0124
+.RT_HEIGHT	EQU	RT_WIDTH+1
+;.RT_EMTBUF	EQU	&0120		; Up to 8 EMT parameters
+;
+.RT_STACK	EQU	&01FE		; Stack for calling RT11
+
+; Uninitialised data
+; ------------------
+.vduChar	EQUB 0
+		EQUB 0,0,0,0,0,0,0,0,0
+align
+.vduQueue
+.SV_TICKER	EQUB 0		; Escape test ticker
+align
+.vduQ		EQUB 0
+.SV_KBDQ	EQUB 0		; Keypresses pending
+.SV_KBDBUF	EQUW 0		; Buffer for pending keypress
+ALIGN
+
+; Memory size
+; -----------
+.SV_MEMBOT	EQUW 0		; Bottom of memory
+.SV_MEMTOP	EQUW 0		; Top of memory
+
+		EQUM (506-$) AND 511	; Pad so shell() saving works

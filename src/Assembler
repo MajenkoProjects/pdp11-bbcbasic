@@ -1,0 +1,69 @@
+; > Assembler
+; BASIC assembler for the PDP11
+
+; Any assembly code just assembles a NOP to identify the BASIC.
+
+
+.cmdAssem
+mov SV_INT_P,r0		; Get P% to store assembly code
+;bic #1,r0		; Ensure even address
+;mov #160,(r0)		; Just store a NOP for identification
+movb #160,(r0)+		; Just store a NOP for identification
+clrb (r0)
+.cmdAssemLp
+movb (r5)+,r0		; Step to ] or <cr>
+cmpb r0,#ASC"]"
+beq  cmdAssemExit
+cmpb r0,#13
+bne  cmdAssemLp
+dec  r5
+.cmdAssemExit
+rts pc
+
+
+;; Only assembly implemented is:
+;; NOP
+;; EQUD &nnnn
+;; OPT &nn - ignored
+;
+;.AssemCR
+;dec r5
+;.cmdAssem
+;jsr  pc,UpdateLPTR
+;bcc  AssemExit		; End of program
+;movb (r5)+,r0
+;cmpb r0,#13
+;beq  AssemCR		; Step to next line
+;cmpb r0,#ASC"]"
+;beq  AssemExit		; ] - end of assembly
+;bic  #32,r0		; Force to upper case
+;clr  r4		; r4=0 - EQUW
+;cmpb r0,#ASC"E"	; EQUW
+;beq  AssemWord
+;dec  r4		; r4=-1 - OPT
+;cmpb r0,#ASC"O"	; OPT
+;beq  AssemWord
+;mov  #160,r4		; r4=160 - anything else is NOP
+;.AssemWord
+;movb (r5)+,r0
+;cmpb r0,#ASC"A"
+;bcc  AssemWord		; Skip to non-letter
+;dec  r5
+;cmp  r4,#160
+;beq  AssemStore	; Store NOP
+;.AssemEqu
+;mov  r4,-(sp)		; Save -1/0
+;jsr  pc,Evaluate
+;mov  (sp)+,r3
+;bne  cmdAssem		; EQ - OPT, skip
+;.AssemStore
+;mov  SV_INT_P,r0	; Get P% to store assembly code
+;bic  #1,r0
+;mov  r4,(r0)+		; Store assembled word
+;mov  r0,SV_INT_P
+;cmpb (r5)+,#ASC","
+;bne  AssemCR		; Not comma, step to next statement
+;clr  r4
+;br   AssemEqu		; Do another EQUW
+;.AssemExit
+;rts  pc

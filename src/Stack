@@ -1,0 +1,254 @@
+; > Stack
+; BASIC stack manipulation and function dispatch
+;
+; 20-Nov-2013: Added UnstackDropStringOp.
+; 23-Dec-2013: String type and length compressed to one word on stack.
+; 25-Dec-2013: EvalStringCR copied to string buffer if not CR-string.
+; 01-Sep-2015: High numbered functions use lookup table instead of long dispatch table.
+; 29-Sep-2015: High Function lookup made postition independent.
+; 28-Jul-2016: Squeezed some instructions out of Function Dispatch.
+; 07-Apr-2024: Stacking strings checks for 256 bytes free space.
+
+
+; StackValAndOp - Push a value and operator onto stack
+; ====================================================
+.StackValAndOp
+tst  r2
+bpl  StackNumAndOp	; Jump to stack number
+
+
+; StackStringAndOp - Push a string and operator onto stack
+; ========================================================
+; On entry, sp=> retaddr
+;           r4=string start, r3=string length, r2=8nxx, r0=operation
+; On exit,  sp=> operation, type+length, string...
+;
+.StackStringAndOp
+jsr  pc,CheckFreeMemory	; Check 256 bytes available on stack, corrupts R1
+mov  (sp)+,r1		; Get return address
+mov  r3,r2		; Copy string length to byte count
+inc  r2
+bic  #1,r2		; Pad to ensure even number
+sub  r2,sp		; Drop stack to fit string
+mov  sp,r2		; Point to string space on stack
+mov  r3,-(sp)		; Stack length
+; should this be whatever r2 on entry was to stack defprocfred($addr, etc.)
+; merge with type done in cmdSub - faster as cmdSub is only place that needs it
+bis  #&8000,(sp)	; Merge stacked length with type, is now &8xnn
+mov  r0,-(sp)		; Stack operation
+tst  r3
+beq  StackStrDone	; Zero-length string
+.StackStrLp
+movb (r4)+,(r2)+	; Copy byte to stack
+dec  r3
+bne  StackStrLp		; Loop to 'push' all characters
+.StackStrDone
+jmp (r1)		; Return via r1
+
+
+; StackIntAndOp - Push integer and operator onto stack
+; ====================================================
+; On entry, r2/r3/r4=current value
+;           sp=> <empty>
+; On exit,  r2/r3/r4 may be corruputed
+;           sp=> operator, exponent, b0-b15, b16-b31
+;                   r0        r2        r4       r3
+; We stack this way around so arithmetic is easier, pop&add b0-b15, pop&add b16-b31, etc.
+;
+.StackIntAndOp
+jsr  pc,EnsureInteger	; If float, convert to integer
+.StackNumAndOp		; sp=> retaddr
+mov  r4,-(sp)		; sp=> r4, retaddr
+mov  2(sp),r4		; sp=> r4, retaddr     r4=retaddr
+mov  r3,2(sp)		; sp=> r4, r3          r4=retaddr
+mov  r2,-(sp)		; sp=> r2, r4, r3      r4=retaddr
+mov  r0,-(sp)		; sp=> r0, r2, r4, r3  r4=retaddr
+jmp  (r4)		; Return via r4
+
+
+; UnstackIntAndCallOp
+; ===================
+.UnstackIntAndCallOp
+; On entry, r2/r3/r4=RHS value
+;           sp=> retaddr, operator, type, b0-b15, b16-b31
+;           sp=> retaddr, operator, type+length, string...
+;
+jsr  pc,EnsureInteger	; If RHS value float, convert to integer
+
+
+; UnstackValAndCallOp
+; ===================
+; Name is slightly wrong, doesn't actually unstack, the called function does the unstacking
+;
+.UnstackValAndCallOp
+			; sp=> retaddr, operator, type, b0-b15, b16-b31
+			; sp=> retaddr, operator, type+length, string...
+;mov  2(sp),r0		; Get operator to r0
+;mov  (sp)+,r1		; sp=> operator, type, b0-b15, b16-b31   r1=retaddr
+mov  (sp)+,r1		; sp=> operator, type, b0-b15, b16-b31   r1=retaddr
+mov  (sp),r0		; Get operator to r0
+mov  r1,(sp)		; sp=> retaddr, type, b0-b15, b16-b31
+			; sp=> retaddr, type+length, string
+mov  2(sp),r1		; r1=LHS type
+bic  #&7FFF,r1		; Keep string/number bit
+xor  r2,r1		; Is it same as RHS type
+bmi  errTypeMis2	; Error if different types
+;bit  #&80,r0
+;bne  EvalChkNums	; b7 operators must be <num> <op> <num>
+tstb r0
+bmi  EvalChkNums	; b7 operators must be <num> <op> <num>
+cmp  r0,#&79
+bcc  EvalFuncPlus	; Comparisons allowed to operate on strings
+cmp  r0,#ASC"+"
+beq  EvalFuncPlus	; '+' allowed to operate on strings
+.EvalChkNums
+tst  r2			; Test RHS type, will be same as LHS type
+bmi  errTypeMis2	; Other operations must be <number> <op> <number>
+.EvalFuncPlus
+cmp  r0,#&79
+bcc  EvalFunctionX	; Dispatch comparisons and AND/DIV/EOR/MOD/OR
+;sub  #3,r0		; Reduce range for '*+,-^/'
+;bic  #&FFF0,r0		; Reduce to 7..12
+;bis  #&80,r0		; Move to &87..&8C
+add  #&5D,r0		; Convert '*+,-^/' to &87/88/89/8a/bb/8c
+bic  #&70,r0		; Convert '*+,-^/' to &87/88/89/8a/8b/8c
+.EvalFunctionX
+
+; EvalFunction - dispatch a function token
+; ----------------------------------------
+;    r0=&FF80-&FFFF from Evaluate
+; or r0=&0070-&007F from binary-op
+; or r0=&FF80-&FF8F from binary-op
+;
+; r2/r3/r4 will be 0 if called from evaluator for tail functions
+; r2/r3/r4 will be RHS for binary functions
+;
+.EvalFunction
+bic  #&FF00,r0			; Wish I could get rid of this
+mov  r0,-(sp)			; Save token
+cmp  r0,#&C6
+bcc  EvalHighFunction
+.EvalFunctionByte
+;add  r0,r0			; Offset into command table
+asl  r0				; Offset into command table
+adr  FunctionTable-256,r1	; Point to command address table
+add  r0,r1			; Index into command table
+add  (r1),r1			; Calculate routine address
+mov  (sp)+,r0			; r0=function/operator token
+jmp  (r1)			; Jump to routine, r0=token, (r5)=>next char
+; Mustn't skipspaces, as that means 'TO P'='TOP' and 'LOAD ATN'='LOADATN'='QUIT'
+
+.EvalHighFunction
+adr  FunctionBytes,r1		; R1=>translation table
+mov  #&C6,r0			; R0=effective token number &C6+
+.EvalHighFunctionLp
+cmpb (r1)+,(sp)			; Compare with stacked token byte
+beq  EvalFunctionByte		; High token matches, use translated token
+inc  r0
+tstb (r1)			; Look for zero terminator
+bne  EvalHighFunctionLp		; Loop through high numbered tokens
+jmp  errNoSuchVar
+
+
+; UnstackStringDropOp - Pop a stacked string
+; ==========================================
+.UnstackStringDropOp
+; On entry, sp=> retaddr, op, type+length, string...
+mov  (sp)+,(sp)		; Overwrite op with return address
+
+
+; UnstackString - Pop a stacked string
+; ====================================
+; On entry, sp=> retaddr, type+length, string...
+; On exit,  r4=string start
+;           r3=string length
+;           r2=type+length
+;           r1=preserved
+;           r0=preserved
+;
+.UnstackString
+mov  sp,r3		; Point to stack
+add  #4,r3		; Point to stacked string
+			; Must prevent SP from being odd
+mov  2(sp),r2		; Get type+length
+jsr  pc,CopyString	; Copy string from r3 to string buffer
+mov  2(sp),r2		; r2=string type+length
+mov  (sp)+,-(r3)	; Get return address and restack it
+mov  r3,sp		; Update SP
+mov  r2,r3		; Copy type+length to r3
+bic  #&FF00,r3		; r3=length of string
+rts  pc			; r1=preserved, r0=preserved
+
+; Ensure string R4=>string R3=length is in string buffer
+; ------------------------------------------------------
+.EnsureString
+mov  r3,r2		; r2=length
+mov  r4,r3		; r3=string start
+
+; Copy string to string buffer
+; ----------------------------
+.CopyString
+adr  SV_STRING,r4	; Point to string buffer
+bic  #&FF00,r2          ; Remove type from type+length
+beq  CopyStringDone	; Zero-length string
+.CopyStringLp
+movb (r3)+,(r4)+	; Copy bytes from stack
+dec  r2
+bne  CopyStringLp	; Loop to 'pop' all characters
+inc  r3
+bic  #1,r3		; Align stack pointer
+.CopyStringDone
+adr  SV_STRING,r4	; r4=start of string
+rts  pc
+
+
+; UnstackDropStringOp - Drop a stacked string
+; ===========================================
+; On entry, sp=> retaddr, dummy, type+length, string...
+; On exit,  r4=preserved
+;           r3=corrupted
+;           r2=corrupted
+;           r1=preserved
+;           r0=preserved
+;
+.UnstackDropStringOp
+mov  (sp)+,r2		; Get return address
+mov  2(sp),r3		; Get stack string type+length
+bic  #&FF00,r3		; Remove type
+add  #5,r3		; Point past stacked data
+bic  #1,r3		; Ensure even address
+add  r3,sp		; Point stack past stacked string
+jmp  (r2)		; Return to caller
+
+
+; SwapStack/SwapStackMin
+; ======================
+; On entry,       sp=>retadr, retadr, r2, r4, r3
+;           r2/r3/r4=value
+;                 r0=token
+; On exit,        r2/r3/r4 and stacked values swapped
+;
+.SwapStackInt
+cmp  r3,8(sp)
+bcs  SwapStack		; Swap smallest integer into registers
+rts  pc
+.SwapStackMin
+cmp  r2,4(sp)		; Compare exponents
+bcs  SwapStackDone	; r2/r3/r4 value already smallest
+.SwapStack
+mov 4(sp),r1
+mov r2,4(sp)
+mov r1,r2		; Swap r2 and stacked r2
+mov 8(sp),r1
+mov r3,8(sp)
+mov r1,r3		; Swap r3 and stacked r3
+mov 6(sp),r1
+mov r4,6(sp)
+mov r1,r4		; Swap r4 and stacked r4
+.SwapStackDone
+rts pc
+
+
+.errTypeMis2
+jmp errTypeMismatch
+

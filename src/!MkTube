@@ -1,0 +1,8 @@
+| Makes PDP11 BBC BASIC ROM for PDP11 Tube system, with BBC I/O only
+|
+*Dir <Obey$Dir>
+*X Access ^.basic/rom wr/r
+*/net::Software.PDP11.Assembler.AsmPDP MakeTube ^.basic/rom basic/lst
+*Access ^.basic/rom r/r
+*SetType ^.basic/rom BBC
+*IfRetVal Error Assembly error

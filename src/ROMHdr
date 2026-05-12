@@ -1,0 +1,61 @@
+; > ROMHdr
+; --------
+; 18-Jan-2001 v0.01 Service code matches *help and *command with ROM title.
+;                   *Help prints ROM title and whole version string.
+; 15-Aug-2005 v0.02 *Help prints ROM title and version number only.
+; 28-Nov-2008 v0.03 *Help optimised slightly.
+; 15-Aug-2015 v0.04 Simple non-matched *Help, claims *BASIC command.
+; 03-Oct-2015 v0.05 Watches for Tube being set up to disable other ROMs if
+;                   not for this CPU and claim *BASIC, checks for Master
+;                   giving 'Not a language' on Reset.
+; 17-Oct-2015 v0.06 Checks the CPU on the other side of the Tube.
+; 23-Aug-2025 v0.07 Check Electron Tube and ROM table.
+
+ORG  &8000
+.HeaderStart
+BR   HeaderEnter		; Allows entry at first byte
+EQUB 0
+EQUB &4C			; 6502 RTS for service entry
+EQUW HeaderService
+EQUB &E0+TUBECPU		; Service+Language+Tube+PDP11
+EQUB HeaderCopyright-HeaderStart
+EQUB 4				; Compatible with 6502 BASIC IV
+EQUS "PDP11 BASIC",0		; ROM title
+EQUB ((VERSION >> 8) AND 15)+48	; Version string
+EQUS "."
+EQUB ((VERSION >> 4) AND 15)+48
+EQUB (VERSION AND 15)+48
+#ifdef DEBUG
+EQUS " (DEBUG  ",YEAR$,")"	; Version date
+#else
+EQUS " (",DATE$,")"		; Version date
+#endif
+.HeaderCopyright
+EQUB 0,"(C)J.G.Harston",0	; Copyright message
+EQUD &0000B000			; Tube transfer address
+EQUD HeaderCode-HeaderStart	; Offset to Tube execution address
+ALIGN
+.HeaderEnter
+BR   HeaderCode			; Allows entry at first byte
+;
+.TUBECPU	EQU	&07
+.TUBEMATCH	EQU 	&77
+.HeaderService
+EQUB &48,&C9,&01,&F0,&31,&C9,&11,&F0,&68,&C9,&27,&F0,&64,&C9,&06,&F0
+EQUB &40,&C9,&09,&D0,&3A,&B1,&F2,&C9,&0D,&D0,&34,&20,&E7,&FF,&A2,&00
+EQUB &BD,&09,&80,&D0,&02,&A9,&20,&C9,&28,&F0,&06,&20,&EE,&FF,&E8,&D0
+EQUB &EF,&20,&E7,&FF,&68,&60,&AD,&7A,&02,&30,&14,&98,&48,&A6,&F4,&2C
+EQUB &B3,&FF,&30,&01,&E8,&BD,&A0,&02,&29,&BF,&9D,&A0,&02,&68,&A8,&68
+EQUB &60,&A6,&F0,&BD,&02,&01,&4A,&B0,&F6,&A0,&00,&B1,&FD,&D0,&F0,&71
+EQUB &FD,&C8,&C0,&17,&D0,&F9,&C9,&EA,&D0,&E5,&A6,&F4,&A9,&8E,&4C,&F4
+EQUB &FF,&AD,&03,&02,&D0,&D9,&98,&48,&A9,&FF,&20,&06,&04,&90,&F9,&A9
+EQUB &00,&48,&48,&A9,&F8,&48,&BA,&A0,&01,&A9,&00,&48,&20,&06,&04,&68
+EQUB &68,&68,&68,&A2,&07,&CA,&D0,&FD,&AE,&E5,&FE,&2C,&B3,&FF,&10,&03
+EQUB &AE,&E5,&FC,&A9,&BF,&20,&06,&04,&E0,TUBEMATCH,&D0,&91,&A0,&0F
+EQUB &A2,&0F,&2C,&B3,&FF,&30,&01,&E8,&BD,&A0,&02,&29,&4F,&C9,&40+TUBECPU
+EQUB &F0,&08,&BD,&A0,&02,&29,&BF,&9D,&A0,&02,&CA,&88,&10,&EB,&A4,&F4
+EQUB &AE,&8C,&02,&30,&0F,&2C,&B3,&FF,&30,&01,&E8,&BD,&A0,&02,&29,&4F
+EQUB &C9,&47,&F0,&03,&8C,&8C,&02,&8C,&4B,&02,&68,&A8,&68,&60
+ALIGN
+;
+.HeaderCode

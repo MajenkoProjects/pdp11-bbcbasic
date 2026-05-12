@@ -1,0 +1,1200 @@
+                         BBC BASIC for the PDP11
+                         =======================
+         J.G.Harston, 70 Camm Street, Walkley, Sheffield, S6 3TR
+                 http://mdfs.net/Software/PDP11/BBCBasic
+                            Date: 01-Aug-2023
+
+                             PDP11 BBC BASIC
+
+                   (C) Copyright J.G.Harston 1989-2023
+
+
+1. Introduction
+
+   PDP11 BBC BASIC has  been designed to be as  compatible as possible with
+   Version 4 of the 6502 BBC BASIC  resident in the BBC Micro Master series.
+   The language syntax is not always  identical to that of the 6502 version,
+   but in most cases the PDP11 version is more tolerant.
+
+   BBC BASIC uses UNIX TRAP calls, RT11/RSTS EMT calls or Tube EMT calls  to
+   interface  with the  host system.   It  can be  installed in  a  suitable
+   directory such as /usr/bin.
+
+   PDP11 BBC BASIC is started with a 'bbcbasic' or 'run basic' command,  and
+   on startup will display a startup message similar to:
+
+               PDP11 BBC BASIC IV Version 1.00
+               (C) Copyright J.G.Harston 1989,2010
+               >
+
+   *QUIT will return  to the calling process, *HELP  will report the current
+   host interface version. When running on Unix the output can be piped with
+   'bbcbasic | ansi' to output ANSI control sequences.
+
+
+2. Memory utilisation
+
+   PDP11 BBC BASIC  requires about 16K  of code space,  resulting in a value
+   of PAGE of about &4000. The remainder of the user memory is available for
+   BASIC  programs, variables  (heap) and  stack.  Depending on the  system,
+   HIMEM can have a value up to &FF00.
+
+
+3. Commands, statements and functions
+
+   The  syntax of BASIC commands, statements and functions are  the same  as
+   the  6502 BASIC  for the BBC Micro version (BASIC 4).  Some commands  and
+   functions are  implemented by calling  operating system entry  points via
+   Unix TRAP or RT11/RSTS EMT instructions and, if supported, by PDPTube EMT
+   instructions,  so their  functionality  depends on  the level  of support
+   implemented by the host interface.
+
+
+4. Special characters
+
+   !      32-bit indirection
+   $      String variable or string indirection
+   %      Integer variable or precedes binary constant
+   &      Precedes hexadecimal constant
+   &o     Precedes octal constant
+   '      New line in PRINT or INPUT
+   *      Precedes an "operating system" command
+   :      Separates statements typed on the same line
+   ;      Introduce comment in assembler, suppress action in PRINT
+   ?      8-bit indirection (PEEK & POKE)
+   [      Enter assembler
+   ]      Exit assembler
+   ~      Convert to hex (PRINT and STR$)
+   =      Convert to octal (PRINT and STR$)
+   /      Convert to binary (PRINT and STR$)
+
+
+5. Variables
+
+   Variable  names may  be  of  unlimited  length  and  all  characters  are
+   significant.  Variable names  must  start with  a letter.  They can  only
+   contain the characters A..Z, a..z, 0..9 and underline. Embedded  keywords
+   are allowed. Upper and lower case variable names are distinguished.
+
+   The following types of variable are allowed:
+           A       real numeric
+           A%      integer numeric
+           A$      string
+
+   The variables A%..Z% are regarded as special in that they are not cleared
+   by  the commands or statements RUN, CHAIN and CLEAR. In addition A%,  B%,
+   C%, D%, E%, F%, X% and Y% have  special uses in CALL and USR routines and
+   O% & P%  have special meanings in the assembler (code  origin and program
+   counter  respectively). The  special variable @%  controls numeric  print
+   formatting. The variables @%..Z% are called "static variables", all other
+   variables are called "dynamic variables".
+
+   Real  variables have  a range  of  approximately +-1E-38  to  +-1E38  and
+   numeric  functions evaluate to 9 significant figure accuracy.  Internally
+   every real number is stored in 40 bits.
+
+   Integer   variables  are   stored  in  32  bits  and  have  a  range   of
+   -2,147,483,648 to 2,147,483,647.
+
+   String variables may contain from 0 to 255 characters.
+
+   All arrays must be dimensioned before use.
+
+   All statements can also be used as direct commands.
+
+
+6. Immediate Commands
+
+   Immediate commands are used at the BASIC prompt.
+
+   Command                    Function
+
+   AUTO [start][,inc]         Generate line numbers.
+
+   DELETE start,end           Delete program lines.
+
+   LIST [line][,line]         List all or part of program.
+
+   LISTO number               Control indentation in LIST.
+
+   LOAD "filename"            Load a program into memory.
+
+   NEW                        Delete current program & variables.
+
+   OLD                        Recover a program deleted by NEW.
+
+   RENUMBER [start][,inc]     Renumber the program lines.
+
+   SAVE ["filename"]          Save the current program to disk. If the first
+                              line of the program is a line 'REM > filename'
+                              then  SAVE  with  no  filename  will  use  the
+                              filename in the REM statement.
+
+
+7. Program Commands
+
+   The following commands can be used in programs or directly from the BASIC
+   prompt.
+
+   CALL address[,arg list]    Call assembly language routine.
+
+   CLEAR                      Clear dynamic variables.
+
+   DATA list                  Data for READ statement.
+
+   DEF FNname[(arg list)]     Define a function.
+   DEF PROCname[(arg list)]   Define a procedure.
+
+   DIM var(sub1[,sub2...])[,..]
+                              Dimension one or more arrays.
+   DIM var exp [,var exp...]  Reserve space for assembler etc.
+
+   END                        Terminate program.
+
+   ENDPROC                    Return from a procedure, dropping out of
+                              any FOR...NEXT or REPEAT...UNTIL loop,
+                              restoring any local variables, error
+                              handler and DATA pointer
+
+   ERROR [EXT] n,string       Generate an error with error number n and
+                              text string. If EXT is present, terminates
+                              the program and returns n to the calling
+                              process.
+
+   FOR var=exp TO exp [STEP exp]
+                              Begin a FOR...NEXT loop.
+
+   GOSUB exp                  Call a BASIC subroutine.
+
+   GOTO exp                   Branch to specified line.
+
+   HIMEM=exp                  Set top of memory used by BASIC and clears
+                              subroutine and loop stack.
+
+   IF exp THEN stmts [ELSE stmt]
+                              Do statement(s) if exp non-zero.
+   IF exp THEN line [ELSE line]
+                              Branch if exp non-zero.
+
+   [LET] var = exp            Assignment.
+
+   LOCAL var[,var...]         Declare variables local to function or
+                              procedure.
+
+   LOCAL ERROR                Localise error handler.
+              
+   LOCAL DATA                 Localise DATA pointer.
+
+   LOMEM=exp                  Set start address of dynamic variable storage
+                              and clears dynamic variables.
+
+   NEXT [var[,var...]]        End FOR...NEXT loop.
+
+   ON exp GOTO line,line.. [ELSE line]
+                              Computed GOTO.
+   ON exp GOSUB line,line.. [ELSE line]
+                              Computed GOSUB.
+   ON exp PROCname.. [ELSE PROCname]
+                              Computed PROC call.
+
+   ON ERROR LOCAL             Localise error handler
+   ON ERROR stmts             Do statement(s) on error.
+   ON ERROR OFF               Restore default error handling.
+
+   PAGE=exp                   Set memory address of user's current program.
+
+   PROCname[(parameter list)] Call a procedure.
+   PROC(exp)[(parameter list)] Indirectly call a procedure.
+
+   READ var[,var...]          Read data from DATA statement(s).
+
+   REM any text               Remark
+
+   REPEAT                     Begin a REPEAT...UNTIL loop.
+
+   REPORT                     Print error message for last error.
+
+   RESTORE [line]             Reset data pointer to beginning or to
+                              specified line.
+
+   RESTORE DATA               Restore localised DATA pointer.
+
+   RESTORE ERROR              Restore localised error handler.
+
+   RETURN                     Return from subroutine.
+
+   RUN                        Run the current program.
+
+   STOP                       Stop program and generate untrappable error.
+
+   TRACE ON                   Start trace mode.
+   TRACE OFF                  End trace mode.
+   TRACE exp                  Trace lines less than exp.
+
+   UNTIL exp                  Terminate loop if exp is non-zero.
+
+   WIDTH exp                  Set print output width.
+
+
+8. Operators
+
+    Symbol    Function
+
+     +       Addition or string concatenation.
+     -       Negation or subtraction.
+     *       Multiplication.
+     /       Division.
+     ^       Involution (raise to power).
+    EOR      Bitwise exclusive-OR (integer).
+     OR      Bitwise OR (integer).
+    AND      Bitwise AND (integer).
+    MOD      Modulus (integer result).
+    DIV      Integer division (integer result).
+     =       Equality.
+     <>      Inequality.
+     <       Less than.
+     >       Greater than.
+     <=      Less than or equal.
+     >=      Greater than or equal.
+
+   The precedence of operators is:
+
+   1.  Expressions in parentheses, functions, negation, NOT.
+
+   2.  ^
+
+   3.  *, /, MOD, DIV
+
+   4.  +, -
+
+   5.  =, <, >, <>, <=, >=
+
+   6.  AND
+
+   7.  OR, EOR
+
+
+9. Arithmetic Functions
+
+   Function        Action
+
+   ! num           32-bit indirection
+
+   ? num           8-bit indirection
+
+   | num           40-bit indirection
+
+   - num           Unary minus
+
+   + num           Unary plus
+
+   ^ var           Address of variable
+
+   ABS num         Absolute value of numeric value.
+
+   ACS num         Arc-cosine of numeric value, in radians.
+
+   ASN num         Arc-sine of numeric value, in radians.
+
+   ATN num         Arc-tangent of numeric value, in radians.
+
+   COS num         Cosine of radian numeric value.
+
+   DEG num         Value in degrees of radian numeric value.
+
+   EXP num         e raised to the power of numeric value.
+
+   INT num         Largest integer less than numeric value.
+                   (Note: INT rounds towards negative infinity,
+                   whereas intvar%= rounds towards zero.)
+
+   LN num          Natural logarithm of numeric value.
+
+   LOG num         Base-ten logarithm of numeric value.
+
+   NOT             One's complement (integer).
+
+   PI              Returns 3.14159265.
+
+   RAD num         Radian value of numeric value in degrees.
+
+   RND[(exp)]      RND     returns random 32-bit integer.
+                   RND(-n) seeds sequence.
+                   RND(0)  repeats last value in RND(1) form.
+                   RND(1)  returns number between 0 and 0.999999999
+                   RND(n)  returns random integer between 1 and n.
+
+   SGN num         1 if exp>0, 0 if exp=0, -1 if exp<0.
+
+   SIN num         Sine of radian numeric value.
+
+   SQR num         Square root of numeric value.
+
+   TAN num         Tangent of radian numeric value.
+
+
+10. String Functions
+
+   Function        Action
+
+   "text"          Constant string.
+
+   $ num           cr-terminated string indirection.
+
+   $$ num          null-terminated string indirection.
+
+   ASC str         Returns ASCII value of first character of string.
+                   Returns -1 if null string.
+
+   CHR$ num        Returns one-character string with ASCII value of exp.
+
+   EVAL str        Evaluates str as an expression and returns resulting
+                   number or string.
+
+   INSTR(r,s[,n])  Returns position of string s in string r, optionally
+                   starting at position n.
+
+   LEFT$(str,exp)  Returns leftmost exp characters of string. If exp is
+                   longer than the string, the whole string is returned.
+                   exp is taken as an 8-bit value, so LEFT$(s$, -1) will
+                   return the whole string.
+
+   LEN str         Returns length of string (0-255).
+
+   MID$(str,m[,n]) Returns sub-string from position m, of length n or to end.
+                   If the calculated string length passes the end of the
+                   string, the whole string from the start position is
+                   returned. exp is taken as an 8-bit value, so MID$(s$,m,-1)
+                   will return the whole string starting from position m.
+
+   RIGHT$(str,exp) Returns rightmost exp characters of string. If exp is
+                   longer than the string, the whole string is returned.
+                   exp is taken as an 8-bit value, so RIGHT$(s$, -1) will
+                   return the whole string.
+
+   STR$[~|=|/] exp Returns string representation of exp in decimal, hex,
+                   octal or binary.
+
+   STRING$(n,str)  Returns a string consisting of n copies of str.
+
+   VAL str         Returns numeric value of str. IF str does not begin with
+                   a signed or unsigned numeric constant, VAL returns zero.
+
+
+11. Program Functions
+
+   COUNT           Returns number of characters printed since last new line,
+                   CLS or MODE.
+
+   END             Returns end of BASIC's variable heap.
+
+   ERL             Returns line number of last error. If the error occurs on
+                   the same line as a FOR/REPEAT/GOSUB/PROC/FN it may be the
+                   line of the matching NEXT/UNTIL/RETURN/ENDPROC/=.
+
+   ERR             Returns error number of last error.
+
+   FALSE           Returns zero.
+
+   FNname[(parameter list)]
+                   Call named user-defined numeric or string function.
+
+   FN(exp)[(parameter list)]
+                   Indirectly call user-defined numeric or string function.
+
+   HIMEM           Returns top of memory used by BASIC.
+
+   LOMEM           Returns start address of dynamic variable storage.
+
+   PAGE            Returns memory address of current user's program.
+
+   REPORT$         Returns error message for last error.
+
+   TOP             Returns first address after end of user's program.
+
+   TRUE            Returns -1.
+
+   USR             Calls a machine code routine and returns integer.
+
+
+12. I/O Commands
+
+   CLG
+   Sends  VDU 16  to the  output stream to clear  the graphics  area of  the
+   screen and  set it to the  currently selected graphics  background colour
+   using the current background plotting action (set by GCOL).
+
+   CLS
+   Sends VDU 12  to the output stream to  clear the text area of  the screen
+   and set  it to  the currently selected text  background colour.  The text
+   cursor is moved to the 'home' position  (0,0) at the top left-hand corner
+   of the text area.
+
+   COLOUR l
+   Sends VDU 17,n to the output stream to select the current text colour.
+
+   COLOUR l,p
+   Sends VDU 19,l,p,0,0,0 to the  output stream to set the palette entry for
+   logical colour l to physical colour p.
+
+   COLOUR l,r,g,b
+   Sends VDU 19,l,16,r,g,b to the output stream to set the palette entry for
+   logical colour l  to physical colour r,g,b. If l is  negative, then sends
+   VDU 19,l,24,r,g,b to the VDU to set the physical colour of the border.
+
+   DRAW x,y
+   Draws a line with the current  graphics foreground colour and action from
+   the last point  visited to the  specified absolute X  and Y position. The
+   size  of the  screen is  always TEXTCOLS*2^(10-INT(LN(A2)/LN(2)))  pixels
+   wide and  TEXTROWS*16 pixels high.  This is 1280x1024  pixels for a 80x32
+   screen mode. DRAW x,y sends PLOT 5,x,y to the output stream.
+
+   ENVELOPE a,b,c,d,e,f,g,h,i,j,k,l,m,n
+   Used in conjunction with SOUND to control the pitch and/or amplitude of a
+   sound whilst it is playing.
+
+   GCOL [m,]c
+   Sends VDU  18,m,c to the  VDU to set  the current graphics  foreground or
+   background  colour and plotting mode.  If m is not  specified, 0 is used.
+   The modes are:
+
+     0 Plot the colour specified.
+     1 OR the colour with the colour that is already there.
+     2 AND the colour with the colour that is already there.
+     3 Exclusive-OR the colour with the colour that is already there.
+     4 Invert the colour that is already there.
+     5 No change to the colour that is already there.
+
+   INPUT [LINE]["prompt"[,]]var[,var]
+   Request input from user. Comma after prompt causes question mark. If LINE
+   is present, accepts the whole line including commas, quotes, etc.
+
+   MODE n
+   Sends VDU 22,n to the  output stream to set  the screen display mode. The
+   screen is  cleared and  all  the graphics  and text  parameters (colours,
+   origin, etc) are reset to their default values. 
+
+   MOVE x,y
+   Moves the graphics cursor to an absolute position without drawing a line.
+   The size of the screen is always TEXTCOLS*2^(10-INT(LN(A2)/LN(2))) pixels
+   wide and TEXTROWS*16  pixels high. This  is 1280x1024 pixels  for a 80x32
+   screen mode. MOVE x,y sends PLOT 4,x,y to the output stream.
+
+   OFF
+   Turns the  cursor off by sending  VDU 23,1,0,0,0,0,0,0,0,0 to  the output
+   stream.
+
+   ON
+   Turns  the cursor  on by sending VDU 23,1,1,0,0,0,0,0,0,0  to the  output
+   stream.
+
+   OSCLI string
+   Pass string to operating system to execute a command.
+
+   PLOT [k,]x,y
+   A multi-purpose drawing statement. Two or three numeric values follow the
+   PLOT keyword:  the first specifies  the type of point,  circle, triangle,
+   line etc.  to be  drawn; the  second and third  values give  the X  and Y
+   coordinates to  be used (in that order).  If only two numeric  values are
+   given, then  k=69 is used to plot a  single point. The two  most commonly
+   used statements, PLOT 4 and PLOT 5, have  the duplicate keywords MOVE and
+   DRAW.  The size of the screen is always TEXTCOLS*2^(10-INT(LN(A2)/LN(2)))
+   pixels wide and TEXTROWS*16 pixels  high.  This is 1280x1024 pixels for a
+   80x32 screen mode.
+
+   PLOT sends VDU 25,k,x MOD 256,x DIV 256,y MOD 256,y DIV 256 to the output
+   stream.
+
+   The following PLOT codes are defined:
+       
+       PLOT 0      Move to a new position.
+       PLOT 1      Draw in current GCOL foreground colour and action.
+       PLOT 2      Draw in inverse colour, as though using GCOL 4.
+       PLOT 3      Draw in current GCOL background colour and action.
+
+       PLOT 0+n    Use relative coordinates
+       PLOT 8+n    Use absolute coordinates
+
+       PLOT 8-15   Last point in line omitted when inverted plotting used.
+       
+       PLOT 16-23  Lines are drawn dotted.
+       
+       PLOT 24-31  Lines are drawn dotted, omitting last point.
+       
+       PLOT 32-39  Solid line, first point omitted.
+       
+       PLOT 40-47  Solid line, both end points omitted.
+       
+       PLOT 48-55  Dotted line, initial point omitted.
+       
+       PLOT 56-63  Dotted line, both end points omitted.
+       
+       PLOT 64-71  Single point is plotted.
+       
+       PLOT 72-79  Horizontal line filling.
+       
+       PLOT 80-87  Plot and fill a triangle formed by the specified position
+                   and the last two points visited.
+       
+       PLOT 88-95  Horizontal line blanking.
+
+   PRINT [TAB(x[,y])][SPC n]['][;][~][=][/][exp[,exp...][;]
+   Print data to output stream.
+
+   QUIT [n]
+   Terminates the program, passing return value or 0 to calling process.
+
+   SOUND OFF
+   Turns off sound output.
+
+   SOUND ON
+   Turns on sound output.
+
+   SOUND channel,loudness,pitch,duration
+   Generates sounds according to the four 16-bit parameters as follows:
+
+       channel
+       Bits 0-3 are the channel number (0-15). If bit 4 is set, the sound
+       queue is flushed and the new sound is started immediately. Bits
+       5-12 may select addition functions where supported. Channels &2000
+       and higher and -1 and lower are reserved for other systems.
+
+       loudness
+       Values from -15 to -1 select a sound of amplitude 15 to 1
+       respectively with constant pitch, zero selects silence and values
+       from 1 to 16 select an envelope (see ENVELOPE statement). Other
+       values are reserved.
+
+       pitch
+       This selects the initial pitch. Middle C is 101, and a semitone
+       change in pitch is a change of 4. Pitch is an 8-bit value and bits
+       8-15 are ignored.
+
+       duration
+       Values from 0 to 254 select the duration of the sound, in units of
+       approximately 1/20 second. The value -1 causes an indefinite sound,
+       which can only be stopped by issuing another SOUND statement with
+       the "flush" bit set or by pressing the ESCAPE key. Other values are
+       reserved.
+
+   TIME=exp
+   Sets system  elapsed time counter.  The program needs to be  running with
+   appropriate permissions  for this to be effective, otherwise there  is no
+   effect.
+
+   TIME$=string
+   Sets  the system real-time  clock. The program needs  to be running  with
+   appropriate permissions  for this to be effective, otherwise  there is no
+   effect. The string must be one of the following formats:
+
+     hh:mm:ss                      for time only
+     dd Mon yyy                    for date only
+     Day,dd Mon yyyy.hh:mm:ss      for full date and time
+
+   Where:
+
+     Day  is the abbreviated weekday name (Mon, Tue, etc).
+     dd   is the day of the month (01, 02, etc).
+     Mon  is the abbreviated month name (Jan, Feb ,etc).
+     yyyy is the year (2003, 2004, etc).
+     hh   is hours (00 to 23).
+     mm   is minutes (00 to 59).
+     ss   is seconds (00 to 59).
+
+   The host may support other formats  for functions such as setting alarms,
+   synchronising sources, and other purposes.
+
+   VDU exp[,|;[exp...]][|]
+   Sends a list of numeric arguments to the VDU. A 16-bit value can be  sent
+   if  the value is followed by a ';'.  It is sent as a pair of  characters,
+   least significant byte first. If the expression list is terminated with |
+   then nine following zeros are sent.
+
+
+13. I/O Functions
+
+   ADVAL channel
+   Returns  information about input devices such as a joystick or mouse,  if
+   fitted, or the number of free spaces in a buffer.  
+
+   ADVAL(0) joystick buttons       ADVAL(-1)  bytes in keyboard buffer
+   ADVAL(1) joystick 1 X-position  ADVAL(-2)  bytes in serial input buffer
+   ADVAL(2) joystick 1 Y-position  ADVAL(-3)  free space in serial output
+   ADVAL(3) joystick 2 X-position  ADVAL(-4)  free space in printer output
+   ADVAL(4) joystick 2 Y-position  ADVAL(-5)  free space in chn 0 SOUND queue
+                                   ADVAL(-6)  free space in chn 1 SOUND queue
+   ADVAL(7) mouse X position       ADVAL(-7)  free space in chn 2 SOUND queue
+   ADVAL(8) mouse Y position       ADVAL(-8)  free space in chn 3 SOUND queue
+                                   ADVAL(-9)  bytes in mouse input buffer
+                                   ADVAL(-10) bytes in MIDI input buffer
+                                   ADVAL(-11) free space in MIDI output buffer
+
+   GET/GET$
+   Waits for keypress and returns ASCII value or one-character string.
+
+   GET(port)
+   Reads a value from the specified I/O port.
+
+   GET(x,y)/GET$(x,y)
+   Reads a character from the specified character position.
+
+   INKEY/INKEY$ exp
+   With  a  positive  argument  waits for  the  specified  maximum  time  in
+   centiseconds for a character from the current input stream, or returns ""
+   or  -1 if no key pressed. With a negative argument returns the host  type
+   or  checks for an individual keypress.
+
+   MODE
+   Returns current screen mode.
+
+   POINT(x,y)
+   Returns  the colour  of the screen at the coordinates  specified. If  the
+   point is outside the graphics window, then -1 is returned.
+
+   POS
+   Returns the current horizontal position of the text cursor on the screen.
+   The left hand column is 0 and the right hand column is one fewer than the
+   number of text columns in the current display MODE.
+
+   QUIT
+   Returns FALSE if running in interactive/editing mode, returns TRUE if a
+   program has been CHAINed from the command line.
+
+   TIME
+   Returns the system elapsed time clock in centiseconds.
+
+   TIME$
+   Reads the system real-time clock,  returning a 24-character string in the
+   following format:
+
+     Day,dd Mon yyyy.hh:mm:ss
+
+   Where:
+
+     Day  is the abbreviated weekday name (Mon, Tue, etc).
+     dd   is the day of the month (01, 02, etc).
+     Mon  is the abbreviated month name (Jan, Feb ,etc).
+     yyyy is the year (2003, 2004, etc).
+     hh   is hours (00 to 23).
+     mm   is minutes (00 to 59).
+     ss   is seconds (00 to 59).
+
+   If no real-time clock is available, a null string is returned.
+
+   VDU num
+   Returns the VDU variable at offset num.
+
+   VPOS
+   Returns  the vertical position of the text cursor. The top row  is row  0
+   and  the bottom  row is  one fewer than the number  of text  rows in  the
+   current display MODE.
+
+
+14. File I/O Commands
+
+   BPUT#chan,exp
+   Write least-significant byte of exp to output stream.
+
+   BPUT#chan,string[;]
+   Write string to output stream, followed by <lf> if ';' not present.
+
+   CHAIN string
+   Load and run a program.
+
+   CLOSE#chn
+   Closes the specified channel. IF chn=0 close all files.
+
+   EXT#chn=exp
+   Sets the extent of an open file.
+
+   INPUT#chn,var[,var...]
+   Reads data from an opened file with multiple calls to BGET.
+
+   PRINT#chn,exp[,exp...]
+   Writes data to an opened file with multiple calls to BPUT.
+
+   PTR#chn=exp
+   Sets the current pointer for an open file.
+
+   RUN string
+   Load and run program.
+
+15. File I/O Functions
+
+   BGET#chn
+   Reads a byte from a channel previously opened with OPENIN or OPENUP.
+
+   EOF#chn
+   Returns TRUE if at the end of the opened file specified by the handle.
+
+   EXT#chn
+   Returns the total length of the opened file specified by the handle.
+
+   GET$#chn
+   Read a <cr>- or <lf>-terminated string from an open file.
+
+   OPENIN string
+   Opens  a file for reading and returns the channel number of  the file.  A
+   returned value of zero signifies that the specified  file was not  found,
+   or  could not be opened for some other reason.
+
+   OPENOUT string
+   Opens  a file for writing and returns the channel number of the file.  If
+   the  specified file does not exist it is created.  If the specified  file
+   already  exists it  is truncated to zero length and all the  data in  the
+   file is lost. A returned value of zero indicates that the specified  file
+   could not be created.
+
+   OPENUP string
+   Opens  a file  for update (reading and writing) and  returns the  channel
+   number of the file. A returned value of zero signifies that the specified 
+   file  was not  found on the disk, or could not be opened  for some  other
+   reason.
+
+   PTR#chn
+   Returns the current pointer for an open file.
+
+
+16. Print Formatting
+
+   By  default, strings are printed left-justified and  numbers are  printed
+   right-justified in a print zone. Numeric quantities will be printed left-
+   justified if preceded by a semicolon (;). A comma (,) causes a tab to the
+   beginning  of the  next print zone, unless the cursor is  already at  the
+   start of a zone. An apostrophe (') in a PRINT or INPUT statement forces a
+   new-line.  A trailing  semicolon  in  a  PRINT  statement suppresses  the
+   new-line.  TAB(x), TAB(x,y)  and SPC(n) may be  used in  PRINT and  INPUT
+   statements  to position  the cursor.  A tilde  (~) causes  numbers to  be
+   printed in hex, an equals (=) causes numbers to be  printed in octal, and
+   a slash (/) causes numbers to be printed in binary.
+   
+   The variable @% controls numeric formatting as follows:
+
+   LS byte:     Width of print zone, 0-255.  Normally 10.
+   Byte 2 :     Number of significant figures or decimal places. Maximum 10.
+   Byte 3 :     Print format type:  0 - General format (default)
+                                    1 - Exponential format
+                                    2 - Fixed format.
+   MS byte:     STR$ flag. If zero then STR$ formats in G9 mode. If nonzero
+                zero then STR$ formats according to bytes 2 & 3 of @%.
+
+   Examples                      Result
+   @%=&2010A                     01234567890123456789
+
+   PRINT "HELLO",8               HELLO            8.0
+   PRINT "HELLO" 8               HELLO       8.0
+   PRINT "HELLO";8               HELLO8.0
+   PRINT "HELLO",;8              HELLO     8.0
+
+   Value            G9            G2            E2             F2
+                  @%=&90A       @%=&20A       @%=&1020A     @%=&2020A
+
+   .001            1E-3          1E-3          1.0E-3         0.00
+   .006            6E-3          6E-3          6.0E-3         0.01
+   .01             1E-2          1E-2          1.0E-2         0.01
+   .1               0.1           0.1          1.0E-1         0.10
+   1                  1             1          1.0E0          1.00
+   10                10            10          1.0E1         10.00
+   100              100           1E2          1.0E2        100.00
+   1000            1000           1E3          1.0E3       1000.00
+
+
+17. Error codes
+
+   Immediate mode only:
+      0 Silly                   0 RENUMBER space        0 LINE space
+
+   Untrappable:
+      0 No room                 0 Sorry                 0 STOP
+        Bad program           
+
+   Trappable:
+      4 Mistake                 4 Missing =             5 Missing ,
+      6 Type mismatch           7 Not in a function     9 Missing "
+     10 Bad DIM                11 DIM space            12 Not LOCAL
+     13 Not in a PROC          14 Array                15 Subscript
+     16 Syntax error           17 Escape               18 Division by zero
+     19 String too long        20 Too big              21 -ve root
+     22 Log range              23 Accuracy lost        24 Exp range
+     26 No such variable       27 Missing )            28 Bad HEX, OCT or BIN
+     29 No such FN/PROC        30 Bad call             31 Arguments
+     32 Not in a FOR loop      33 Can't match FOR      34 Bad FOR variable
+     35 Bad STEP               36 Missing TO           37 No room for FN/PROC
+     38 No GOSUB               39 ON syntax            40 ON range
+     41 No such line           42 Out of DATA          43 No REPEAT
+     44 No room for FOR/REPEAT 45 Missing #            54 ERROR/DATA not LOCAL
+
+    190 Directory full        192 Too many open files 192 Can't save file
+    196 File exists           198 Disk full           200 Close error
+    202 Data lost             204 Bad name            214 File not found
+    222 Channel               223 End of file         242 Bad memory access
+    243 Bad word access       253 Bad string          254 Bad command
+
+
+18. Indirection operators
+
+   Indirection  is the process which is  provided by PEEK and POKE in  other
+   dialects of BASIC.  There are three indirection operators:
+
+       Name          Purpose                           No. of bytes affected
+    ?  query         byte indirection operator         1
+    !  pling         word indirection operator         4
+    |  bar           real indirection operator         5
+    $  dollar        cr-string indirection operator    1 to 256
+    $$ double-dollar null-string indirection operator  1 to 256
+
+      Y=PEEK(X) is equivalent to Y=?X
+      POKE X,Y  is equivalent to ?X=Y
+
+   ! acts on four successive bytes. For example, !M=&12345678 would load &78
+   into address M,  &56 into address M+1, &34 into address M+2  and &12 into
+   address M+3.
+
+   | acts on five successive bytes.  For example, |M=0.5 would load &00 into
+   address M,  &00 into address M+1, &00 into address M+2,  &20 into address
+   M+3 and &82 into address M+4.
+
+   $ writes a string  followed by carriage return, CHR$13,  into memory at a
+   specified address, e.g. $M="ABCDEF" will  place the ASCII characters A to
+   F in locations M to M+5 and will load &0D into address M+6.
+
+   $$ writes a string followed by a null, CHR$0,  into memory at a specified
+   address, e.g.  $$M="ABCDEF" will  place the  ASCII characters  A to F  in
+   locations M to M+5 and will load &00 into address M+6.
+
+   Query (?)  and pling (!) can  also be used as binary operators,  e.g. M?3
+   means "the contents  of memory location M+3". The  left-hand operand must
+   be a variable, not a constant.
+
+   The power  of indirection  operators is  in the  way they  can be used to
+   create your own  data structures. For  example you may  need a  structure
+   consisting of a 10 character string, an 8-bit number and a reference to a
+   similar structure. If M is the address of the start of the structure
+   then:
+
+      $M   is the string
+      M?11 is the 8-bit number
+      M!12 is the address of the related structure.
+
+   In  this  way  you  can  create and  manipulate  linked  lists  and  tree
+   structures in memory, very easily.
+
+   A  5-byte real  can hold a 4-byte integer with the real  exponent set  to
+   zero and  the mantissa holding the integer value. The mantissa  is stored
+   in memory in the lower four bytes so that if |address is an integer, then
+   !address will return it. For example, if you do |address=A% then !address
+   will return A%.
+
+   Similarly, a 4-byte integer  can hold an 8-bit byte  with the top 23 bits
+   clear.  The lowest byte is stored in the lowest memory address so that if
+   !address is a byte, then ?address will return it.  For example, if you do
+   !address=A% and A% is an 8-bit byte then ?address will return A%.
+
+
+19. Access to machine code
+
+   The USR  function and  the CALL  statement provide  a flexible  interface
+   between BASIC  and machine code  routines. Both  USR and  CALL initialise
+   the PDP11's registers prior to the machine-code call as follows:
+
+          R0 register = A%
+          R1 register = B%
+          R2 register = C%
+          R3 register = D%
+          R4 register = E%
+          R5 register = F%
+          R6 register = stack with return address at the top
+          R7 register = entry point of machine code routine
+
+   USR address
+          Calls the  machine-code routine and returns a 32-bit  integer made
+          up  of  the  contents  of R0  and R1  (least-significant to  most-
+          significant) on return from the routine.
+
+   CALL address[,parameter list]
+          Sets up a  parameter block on the stack containing  details of the
+          parameters, along with a return address, in the following format:
+
+          Return address           2 bytes at (sp)
+          BASIC return address     2 bytes at 2(sp)
+
+          Number of parameters     2 bytes at 4(sp)
+
+          Parameter type           2 bytes at 6(sp)
+          Parameter address        2 bytes at 8(sp)
+
+          Parameter type           ) repeated as often as necessary
+          Parameter address        )
+
+          The parameter types are:
+
+              Code No.     Parameter Type     Example
+              &0001        Byte (8 bits)      ?A% or A%?num
+              &0004        Word (32 bits)     !A% or A% or A%!num or A%(...)
+              &0005        Real (40 bits)     |A or A or A(...)
+              &8000        Movable string     A$ or A$(...)
+              &8100        Fixed cr-string    $A%
+              &8200        Fixed null-string  $$A%
+
+   Parameters are passed by reference and may be changed by the machine-code
+   routine.
+
+   Except  in the  case of  a movable string (normal  string variable),  the
+   parameter address  given is  the absolute  address at  which the  item is
+   stored. In the case of movable strings (type &8000) it is the address  of
+   a  4-byte parameter block containing the start address of the string (LSB
+   first), the current length and the maximum length in that order.
+
+   Integer variables  are stored  in twos complement  form with  their least
+   significant byte first.
+
+   CR-terminated fixed  strings are stored  as the characters of  the string
+   followed by a carriage return (&0D).
+
+   Null-terminated fixed strings  are stored as the characters of the string
+   followed by a null (&00).
+
+   Floating point variables are stored  in binary floating point format with
+   their least significant  byte first; the fifth byte is  the exponent. The
+   mantissa is stored as a binary fraction in sign and magnitude format. Bit
+   7 of the most  significant byte is the sign bit and,  for the purposes of
+   calculating the magnitude of the number, this bit is assumed to be set to
+   one. The exponent is  stored as an integer in excess  128 format (to find
+   the exponent subtract 128 from the value in the fifth byte).
+
+   If the exponent byte of a floating point number is zero, the number is an
+   integer stored in integer  format in the mantissa  bytes. Thus an integer
+   can be represented in two different  ways in a real variable. For example
+   the value +10 can be stored as:
+
+          address +0 +1 +2 +3 +4
+                  0A 00 00 00 00         Integer 10
+                  00 00 00 20 83         (1 + 0.25) * 2^3
+
+   USR or a CALL to an address in the  &FF00-&FFFF range accesses various OS
+   functions as detailed in section 20.
+
+
+20. Operating system interface
+
+   All  Operating  System  ("star")  commands  are  passed to  the  host  to
+   implement. The *QUIT command is checked for to exit the current program.
+
+   CALLs and USRs to addresses in the range &FF00 to &FFFF provide access to
+   the  machine  operating  system,  as  with  the  BBC  microcomputer.  The
+   PDP11's R0, R1 and R2 registers are  initialised to the integer variables
+   A%, X% and Y%  respectively. If X%<256,  then R1 is set  to X%+256*Y%. If
+   calling OSARGS, OSBGET  or OSBPUT, then R1 is set to Y% and R2  is set to
+   X%.
+
+   In the case of USR, the returned  32-bit value is composed of the PDP11's
+   R2, R1 and R0 registers corresponding to the 6502's Y, X and A registers,
+   most significant to least significant, as follows:
+
+          b0-b7   = R0
+          b8-b15  = R1
+          b16-b23 = R2
+          b24     = Carry flag
+
+
+21. The VDU system
+
+   Control Characters:
+
+   The following VDU codes are  defined. BBC BASIC itself does not implement
+   the actions specified, it just issues the byte sequence.  The output from
+   BBC BASIC  can be piped into a  suitable VDU driver to implement  the VDU
+   sequences with  a command  such as  bbcbasic | ansi.  The RT11 version of
+   BBC BASIC includes an ANSI text and colour driver.
+
+   VDU 0    Null.
+
+   VDU 1,n  Send byte to raw output, bypassing VDU driver.
+
+   VDU 2    Enable printer.
+
+   VDU 3    Disable printer.
+
+   VDU 4    Causes text to be written at the text cursor.
+
+   VDU 5    Causes text to be written at the graphics cursor.
+
+   VDU 6    Enables VDU output. Cancels the effect of VDU 21.
+
+   VDU 7    Causes a "beep".
+
+   VDU 8    Moves the text cursor left one character.
+
+   VDU 9    Moves the text cursor right one character.
+
+   VDU 10   Moves the text cursor down one line.
+
+   VDU 11   Moves the text cursor up one line.
+
+   VDU 12   CLS:  Clears  the text  window to  the current  text  background
+            colour and moves the text cursor to (0,0).
+
+   VDU 13   Moves the text  cursor to the left-hand edge  of the window, but
+            does not move it vertically.
+
+   VDU 14   Enter paged mode.
+
+   VDU 15   Stop paging.
+
+   VDU 16   CLG: Clears  the graphics  window using  the current  background
+            GCOL  action  and  colour.
+
+   VDU 17,n COLOUR n: Sets the text foreground, background or border colour.
+            COLOUR &00+n sets the text foreground colour where supported.
+            COLOUR &40+n sets any text extension colour where supported.
+            COLOUR &80+n sets the text background colour where supported.
+            COLOUR &C0+n sets the border colour where supported.
+            The colour n is %fibgr: flash, bright, blue, green, red.
+
+   VDU 18,a,c
+            GCOL a,c: Sets the graphics  colour and plot action.  The colour
+            numbers are as for VDU 17.
+
+   VDU 19,l,p,r,g,b
+            Sets the logical to physical colour mapping.
+
+   VDU 20   Sets  text   and  graphics  colours  to  their   default  values
+            (background black, foreground white) and resets the palette.
+
+   VDU 21   Disable VDU output. All VDU commands except 6 are ignored.
+
+   VDU 22,n MODE n: Selects a  new screen mode and resets  all screen driver
+            variables (colours, palette, windows, cursor positions, graphics
+            origin etc.).
+
+   VDU 23,n,r1,r2,r3,r4,r5,r6,r7,r8
+            Program  user-defined  graphics   characters,  and  various  VDU
+            functions.
+
+   VDU 24,leftx;bottomy;rightx;topy;
+            Define graphics window.
+
+   VDU 25,n,x;y;
+            PLOT k,x,y: Performs a PLOT action.
+
+   VDU 26   Reset text  and  graphics  windows  to  their  default positions
+            (filling the  whole screen),  home text  cursor,  move  graphics
+            cursor to 0,0 and reset the graphics origin to 0,0.
+
+   VDU 27   Do nothing.  The native  VDU system may interpret any  following
+            characters.
+
+   VDU 28,leftx,bottomy,rightx,topy
+            Set a text  window. The  text cursor  is moved  to the  new home
+            position.
+
+   VDU 29,x;y;
+            Move the graphics origin to the specified coordinates.
+
+   VDU 30   Home the text  cursor, to the  top-left hand  corner of the text
+            window.
+
+   VDU 31,x,y
+            TAB(x,y): Moves the  cursor to the position  (x,y) if within the
+            text window. If the coordinates are invalid they are ignored.
+
+   VDU 127  Backspace the  cursor by one  position and delete  the character
+            there.
+
+
+22. Operating System Commands
+
+   The following commands  are implemented by the  host code that interfaces
+   BBC BASIC to the host system.
+
+   *| comment                  Everything after the | is ignored.
+
+   */filename [parameters]     Run the specified file.
+
+   *HELP                       Displays help message.
+
+   *QUIT                       Return to calling process, if supported.
+
+   *ESC [ON|OFF]               Enables or disables the Escape key.
+
+   *LOAD filename [addr]       Loads data into memory. If the host supports
+                               load addresses the hex addr can be omitted.
+   
+   *SAVE filename start end [exec [load]]
+   *SAVE filename start+length [exec [load]]
+                               Save data from memory to disk, from the start
+                               to the byte before end. If the host does not
+                               support load/execution addresses, they are
+                               ignored. Addresses are all specified in hex.
+
+   If a *command is  not recognised, it is passed to the host to execute.
+
+   A "star" command cannot contain variable names and must be the last  item
+   on  a program line.  To include a variable name use the OSCLI  statement,
+   e.g. to delete a file whose name is known only at run time:
+
+          OSCLI "rm "+filename$
+
+
+23. Random access files
+
+   BBC BASIC supports both random access and the ability to modify  (update)
+   a previously written file. Random access is performed by a single pointer
+   (PTR#chn)  which can be positioned anywhere in the file. The  pointer  is
+   automatically  incremented after  every  read or  write operation  (using
+   BGET#, BPUT#, INPUT# or PRINT#).
+
+   Examples:
+
+      100 REM Read a file backwards
+      110 in%=OPENIN(filename$):size=EXT#in%
+      120 FOR point=size-1 TO 0 STEP -1
+      130 PTR#in%=point : PRINT CHR$(BGET#in%);
+      140 NEXT : CLOSE #in%
+
+      100 REM Update a "record" in a random-access file
+      110 in%=OPENUP(filename$)
+      120 PTR#in%=record_number*record_length
+      130 PRINT #in%,new_data,new_data$
+      140 CLOSE #in%
+
+
+24. Host Environment
+
+  The host system can be identified in several ways:
+
+  A%=0:X%=1:os%=((USR&FFF4)AND&FF00)DIV256 returns 8 when running on UNIX to
+  indicate UNIX and UNIX style pathnames directory/filename.ext. It returns
+  &2B if running on RSTS/RT11/UKNC to indicate D:filename.ext pathnames.
+
+  If OSBYTE 0 returns 8, then INKEY-256 returns:
+      &FE: NetBSD           &F6: OpenBSD
+      &FB: BeOS             &F5: Amiga
+      &F9: Linux            &F4: GNU FreeBSD
+      &F8: MacOS            &F3: GNU
+      &F7: FreeBSD
+      &Bx: PDP11 Unix, &B5=Unix v5, &B6=Unix v6, &B7=Unix v7, &B8=Unix v8
+                       &B9=BSD2.9,  &BB=BSD2.11
+           (interim: &B0=RT11/RSX/RSTS)
+
+  If OSBYTE 0 returns 8,  then A%=0:Y%=0:fs%=(USR&FFDA)AND&FF will return 24
+  to indicate a UNIX filing system.
+
+  [OPT 0:NOP:] assembles &A0 to identify the CPU as a PDP11.
+
+
+25. Technical notes
+
+   Some ARM BASIC V double-tokens are recognised internally,  but are listed
+   as the single-token components.
+
+   Internal memory:
+     ^@%-512 : String buffer, can be fetched with $(^@%-512) or $(PAGE-&300)
+     ^@%-256 : Input buffer, can be fetched with $(^@%-256) or $(PAGE-&200)
+     ^@%     : Integer variables
+     ^@%+108 : Pointers to dynamic variables
+     ^@%+242 : Memory structure pointers
+     ^@%+256 : Default PAGE
+   
+     A%=EVAL("0:"+text$):token$=$(^@%-510)
+               will tokenise text$ and put it in token$.

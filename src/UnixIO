@@ -1,0 +1,2002 @@
+; > UnixIO
+; Interface to Unix host system
+; -----------------------------
+;#define ESCPOLL	; Always used Escape polling
+
+; NOTE: This module uses a lot of absolute addresses, whereas BASIC itself
+; is carefully written to be position independant. When this module is
+; executing it knows it's running on UNIX, which uses TRAP calls with
+; absolute address parameters, so by definition, the code is always loaded
+; into memory at &0000, so absolute addresses are usable.
+;
+; A lot of the code is very messy to provide a clean interface to the Unix
+; system where a lot of the calls are inconsistant and broken in various ways.
+;
+; All TRAP calls modify R0 (specified in Unix7, implied in Unix6)
+; On return from TRAP
+;   Carry is unchanged if there is no TRAP handler (eg an emulator)
+;   Carry is clear if Ok, set if error in R0
+; So, setting Carry before TRAP will leave Carry set after TRAP if no TRAP handler.
+;
+; Same state implemented on EMT calls
+; On return from EMT
+;   Carry is unchanged if there is null EMT handler (eg on hardware Unix)
+;   Carry is clear if Ok, set if error
+; So, setting Carry before EMT will leave Carry set after EMT if no EMT action.
+;
+; NOTE: On pre-Unix7 the INTR key cannot be changed, it is fixed at CHR$127.
+; Consequently, Escape keypress is polled directly by IO_CheckEscape routine
+; with STD set to raw input. Uses a ticker to only test every few calls to
+; avoid thrashing the fileio code, currently set to every 256 calls.
+
+; BSD2.9: after IO_CLI, waits for keypress. stty issue?
+; To do: OSFILE 5
+; To do: optimise reading TIME.
+; To do: read EXT# directly to bypass pre-V7 issues.
+; To do: command line could remove trailing space.
+; To do: SIGEMT could be set to IGNORE, which will return CS.
+
+; 08-Feb-2008: RDCH/WRCH use direct TRAP calls
+; 09-Feb-2008: CLI checks for *Quit, seperate ostty and mytty settings
+; 10-Feb-2008: Vectors explicity set on startup, calls chain through to
+;              BBC calls if BBC environment available.
+; 22-Aug-2008: Set up unix handlers, ESCFLG set on SIGINT.
+; 25-Feb-2009: Working on SIGINT handler and cooked/raw tty settings
+; 27-Feb-2009: Some problems with read() vs SIGINT/SIGQUIT. If RDCH is
+;              wrapped in tty_raw/tty_mine calls, A%=GET never returns;
+;              if RDCH is not wrapped in tty_raw/tty_mine calls, SIGINT
+;              and SIGQUIT don't terminate RDCH. Will need to investigate
+;              deeper.
+;              QUIT has to send some output before calling tty_host. Is
+;              this generic? Is there a flush() call usable instead?
+;              Using ioctl() fixes the problem, but ioctl() isn't available
+;              on v6.
+;              All output delays turned off, crmod turned off, INT/QUIT
+;              keys restored on quit
+;              Try to call ioctrl() via indir to catch unsupported calls on v6
+; 16-May-2010: OSFILE &FF (load) implemented.
+; 02-Jun-2010: OSFILE &FF load count is SP-(load address)
+;              If running on Unix, PAGE=(SP AND &FC00), data at bottom of
+;              stack memory.
+; 23-Jun-2010: OSFILE &00 (save) implemented, SAVE opens with creat(),
+;              LOAD opens with open(). OPENOUT calls creat(). SIGSEG and
+;              SIGBUS trapped and generate local error.
+; 26-Jun-2010: OSARGS implemented - PTR, EXT, EOF, Alloc.
+; 01-Jul-2010: OSCLI implemented.
+; 20-Jan-2012: IO_InitMem uses sbrk() to claim memory from PAGE upwards.
+;              ARGS &FF calls sync(), *cd <dir>.
+; 10-Feb-2013: Unix vectors moved here from SysVars.
+; 30-Dec-2013: Tidied up TTY settings, gets istty() state of stdin and stdout
+;              OSCLI uses generalised command table, added */ command.
+;              Reads centisecond TIME on Unix 7.
+; 26-Jan-2014: Combined IO_ReadCommand into IO_Init, checks for embedded program
+; 28-Jan-2014: UNIX_GBPB checks #3 not #2 for write, GBPB, ARGS, FILE control block
+;              word access optimised.
+; 22-Jul-2016: Signal handlers set up from a table, removed double-vectoring.
+;              Trimmed stty() calls on startup, tweeked CmdLine scanning.
+;              INKEY-256 returns &Bx for machine type.
+; v5/v6 uses 16-bit seek, v7 uses 32-bit seek
+; v5/6 doesn't return PTR from seek(), v7 does return PTR from lseek().
+; Consequently, =PTR, =EXT and =EOF don't work on v5/v6. Grrr.
+; 07-May-2020: OSARGS checks for Unix version to adjust call to seek()/lseek().
+;              Prevents 'Bad word access' error, but results in =PTR/=EXT/=EOF giving
+;              wrong values. No API to read PTR, only able to set PTR.
+; 12-Jun-2020: *ESC ON/OFF works, OSRDCH returns R0=ESC if ESC OFF.
+; 28-Jun-2020: Unix v6,v7 recognise extended keypresses, Unix v6 fakes background
+;              Escape polling.
+; 30-Jun-2020: Optimised extended keypress reading. Unix v5 not working properly.
+;              InitTTY recognises Unix v5, allows Unix v5 extended keypresses to work.
+; 12-Jul-2020: Added delay to TTYtest to cope with telnet delays.
+;              TTYtest only needs a delay when already fetched <esc>.
+;              TTYInit scans memory to find kbdQ location.
+; 21-Jan-2022: Started working on BSD code.
+; 24-Jan-2022: Worked out BSD2.11 ioctl() parameters.
+; 24-Jul-2022: Started working out BSD2.9 API.
+; 29-Jul-2022: Switches stack out of stack segment for BSD.
+; 01-Aug-2022: Detects and runs on BSD2.9 - can't find kbdQ at the moment.
+;              Added ADVAL(-1).
+; 04-Aug-2022: BSD2.11: load/save, =TIME.
+; 07-Aug-2022: Added *load/*save.
+; 01-Aug-2023: Optimised IO_RDCH, IO_WRCH entries, rewrote TTY test routines.
+; 02-Aug-2023: ANSI keyboard processing seperated out into seperate module.
+; 08-Aug-2023: OSCLI calling external works on BSD211. Some tidying.
+; 12-Aug-2023: BSD *chdir.
+; 19-Aug-2023: Combined fopen and data transfer from OSGBPB and OSFILE.
+; 20-Aug-2023: BSD OSARGS and EOF done.
+; 15-Sep-2023: Calling shell process wrapped in VDU0 to send signal to LF piper.
+; Testing Unix7 with SIGINT=IGN and polling Escape. -> Ok in SIMH, but E11 doesn't like it.
+; 07-Apr-2024: Moved IO_xxxx entries to actual routines and generate errors.
+; 12-Apr-2024: BGET/BPUT merged code, BGET checks for EOF, better EOF routine.
+; 19-Apr-2024: BSD211 signals work, tidied up and optimised.
+; 30-Apr-2024: BSD2.9 tests keyboard buffer so function keys work.
+; 31-Dec-2024: Fixed EOF handling on BGET never resetting EOF flag. Also fixed BSD clearing
+;              EOF flag on BPUT/WRCH.
+; 01-Jan-2026: Some fiddling with startup system checking.
+
+
+; Console Input settings
+; ----------------------
+; There is no API to test for pending key input, so the code has to bypass the API
+; and reach into kernel memory. May be delays between incoming characters so need
+; to pause after receiving <esc> to tell apart <esc> <nochar> and <esc> <char>.
+.KBD_TICK	equ 000		; Foreground Escape key ticker
+.KBD_DELAY	equ 100		; Delay loop to confirm <nochar> after <esc>
+
+; SV_SYS flag settings
+; --------------------
+.FLG_UNIXVER	equ &0E
+.FLG_UNIXNEW	equ &0C		; 00: seek(), stty(), 1sec; <>00: lseek(), ioctl(), milliseconds
+.FLG_UNIXBSD	equ &0C		; <>11: inline parameters;    11: stacked parameters
+.FLG_UNIXV9	equ &08		; 0xx: read kbdQ manually;   1xx: FIONREAD available
+.FLG_UNIXV7	equ &04
+.FLG_UNIXV6	equ &02
+.FLG_UNIXV5	equ &00
+
+;.FLG_NOTTY1	equ &02
+.FLG_NOTTY0	equ &01
+
+
+; Initialise Host I/O system
+; ==========================
+; On entry, r5=&0BBC for BBC environment or <>&0BBC otherwise
+;           r6=>top of memory-2, bottom of stack, startup parameters
+;               stacked parameters end with -1 or 0 (documented as 0, actually -1)
+; On exit,  r0=bottom of memory
+;           r1=top of memory
+;           string buffer holds command line, SV_SYS holds environment flags
+;
+; BBC:       r0=0000, r1=0000, r2=0000, r3=0000, r4=0000, r5=0BBC, r6=FFxx stack
+;                 or r1=>cmdline
+; Bell:      r0=0000, r1=0000, r2=0000, r3=0000, r4=0000, r5=0000, r6=FFxx stack
+; Unix7:     r0=0A72, r1=39E2, r2=0000, r3=0000, r4=0000, r5=0000, r6=FFxx stack
+; BSD2.9 su: r0=0A72, r1=39E2, r2=0000, r3=0000, r4=0000, r5=0000, r6=FFxx stack
+; BSD2.9 mu: r0=0001, r1=4E48, r2=0000, r3=0000, r4=0000, r5=0000, r6=FF98 stack
+; BSD2.11:   r0=0000, r1=0A8E, r2=0000, r3=0D82, r4=0D02, r5=FEFA, r6=FF7C infile
+;                                        varies   varies
+;                                about 0D00/0D80+6*len(cmdline)
+.IO_Init
+;mov  r0,r4		; Move BSD2.9 flag into R4
+; Not needed if setpgrp() test used instead
+
+; Look for embedded BASIC program
+; -------------------------------
+; Should be done after memory claimed, otherwise will be moving to unclaimed memory.
+; No longer a problem, as is already at the correct address in memory.
+;
+clr  -(sp)		; Clear and stack SV_SYS
+mov  SV_EMBED,r0	; Look for any embedded BASIC program
+beq  IO_Init0		; Nothing embedded
+bis  #FLG_QUIT+FLG_EMBED,(sp)	; Set QUIT+EMBED in stacked SYS flag
+.IO_Init0
+
+; Set BBC handlers
+; ----------------
+#ifndef NOEMT
+ cmp  r5,#&0BBC		; Is BBC environment available?
+ bne  IO_InitSignals	; No, jump to set up signals
+ bis  #FLG_BBCEMT,(sp)	; Flag that BBC calls available
+ mov  #-2,r0		; -2 = Escape handler
+ clr  r1		; Keep default handler routine
+ ;adr  SV_ESCFLG,r2	; Set handler buffer address
+ mov  #SV_ESCFLG,r2	; Set handler buffer address
+ emt  14		; Set Escape flag
+ dec  r0		; -3 = Error handler
+ ;adr  ErrorHandler,r1	; Set handler routine
+ mov  #ErrorHandler,r1	; Set handler routine
+ clr  r2		; Keep default buffer address
+ emt  14		; Set Error handler
+#endif
+
+; Catch system signals
+; --------------------
+.IO_InitSignals
+#ifndef BSD211
+ mov #14,r0		; 14 signals to catch
+ .IO_InitSigLp
+ mov r0,-(sp)
+ jsr pc,sig_Catch	; Catch this signal
+ mov (sp)+,r0
+ dec r0
+ bne IO_InitSigLp	; Loop down to signal 1
+ ; We have a bit of a race condition here. We've set the signals,
+ ; but we haven't moved the stack yet. If INTR happens before we
+ ; get to MemInit, we will bomb out.
+#else
+ clr -(sp) ; mov #0,-(sp)
+ clr -(sp)
+ clr -(sp)
+ clr -(sp)		 ; sigdest,0,0,0
+ mov sp,r0		 ; r0=>newvec
+ clr -(sp)		 ; oldvec=0
+ mov r0,-(sp)		 ; newvec=>vector on stack
+ clr -(sp)		 ; signum
+ mov #sigtramp,-(sp)	 ; trampoline
+ mov #sig_Handlers,-(sp) ; pad,tramp,signum,newvev,oldvec, sigdest,0,0,1
+ .IO_InitSigLp
+ mov (sp),r0		 ; Get =>siginfo
+ mov (r0)+,4(sp)	 ; Get signum
+ beq IO_InitSigOk	 ; End of table
+ mov (r0)+,10(sp)	 ; Get sigdest
+ mov r0,(sp)
+ trap 31		 ; sigaction()
+ br IO_InitSigLp
+ .IO_InitSigOk
+ add #18,sp
+#endif
+
+
+; Set up TTY settings
+; -------------------
+mov  (sp)+,SV_SYS	; Set SYS and clear ESCFLG
+#ifndef BSD211
+jsr  pc,UNIX_WRCH0	; 'Kick' tty - but puts 00 in output stream
+#endif
+jsr  pc,tty_Init
+
+; Read command line to string buffer
+; ----------------------------------
+; Bell, BSD29:
+;  sp=>retaddr, argn, &arg[0], &arg[1], ... 0, &env[0], ... 0
+;
+; BSD211:
+;  sp=>retaddr, envn, argn, &arg[0], &arg[1], ... 0, &env[0], ... 0
+;
+mov  #SV_STRING,r2	; Point to string buffer
+mov  sp,r0		; Point to stack frame
+#ifdef BSD211
+; mov (r0),SV_ENVPTR
+#endif BSD211
+cmp  (r0)+,(r0)+	; Point to before 1st parameter
+.IO_CmdNext
+tst  (r0)+		; Step to next parameter
+mov  (r0),r1		; Get address of parameter
+beq  IO_CmdEnd		; 0 - end of parameters
+inc  r1
+beq  IO_CmdEnd		; -1 - end of parameters
+dec  r1
+cmp  r2,#SV_STRING
+bne  IO_CmdCopy		; Options have been stepped past
+cmpb (r1),#ASC"-"	; Is it an option to BASIC
+beq  IO_CmdNext		; Skip BASIC options
+.IO_CmdCopy
+movb (r1)+,(r2)+	; Copy bytes from parameter to string buffer
+bne  IO_CmdCopy		; Loop until zero byte
+movb #ASC" ",-1(r2)	; Replace zero byte with space
+br   IO_CmdNext		; Jump back for next parameter
+.IO_CmdEnd
+movb #13,(r2)		; Store terminating <cr>
+
+; Return memory limits
+; --------------------
+#ifdef BSD211
+ clr -(sp)		; Start at &10000
+ clr -(sp)		; Padding
+ .IO_InitMemLp
+ sub  #256,2(sp)	; Step down 256 bytes
+ trap 69		; SYS brk,addr
+ bcs  IO_InitMemLp	; Not claimable, try a bit less
+ tst  (sp)+		; Drop padding
+ mov  (sp)+,r1		; r1=top of memory
+;
+ mov (sp),r0		; Pick up return address
+ mov r1,sp		; BSD: move stack into data segment
+ mov r0,-(sp)		; Restack return address
+ trap 152		; nostk() - release stack
+;
+
+; bis  #(11-5)*2,SV_SYS	; Set to UnixV11
+#else
+ clr  r1		; r1=top of memory, start at &10000
+ mov  #&8911,TRAP_BUF	; SYS brk
+ .IO_InitMemLp
+ sub  #256,r1		; Step down 256 bytes
+ mov  r1,TRAP_BUF+2
+ TRAP 0			; SYS brk,addr
+ EQUW TRAP_BUF
+ bcs  IO_InitMemLp	; Memory not claimable, try a bit less
+ 
+; R4 still has R0 entry value:
+; BBC:       r0=0000, r1=0000, r2=0000, r3=0000, r4=0000, r5=0BBC, r6=FFxx stack
+; Unix5:     r0=0000, r1=0000, r2=0000, r3=0000, r4=0000, r5=0000, r6=FFxx stack
+; Unix6:     r0=0000, r1=0000, r2=0000, r3=0000, r4=0000, r5=0000, r6=FFxx stack
+; Unix7:     r0=0A72, r1=39E2, r2=0000, r3=0000, r4=0000, r5=0000, r6=FFxx stack
+; BSD2.9 su: r0=0A72, r1=39E2, r2=0000, r3=0000, r4=0000, r5=0000, r6=FFxx stack
+; BSD2.9 mu: r0=0001, r1=4E48, r2=0000, r3=0000, r4=0000, r5=0000, r6=FF98 stack
+; tst  r4
+; beq  IO_InitMemOk	; Not BSD2.9
+
+;#ifndef NEWTEST
+; cmp r4,#1
+; bne IO_InitMemOk	; Not BSD2.9
+; mov (sp),r0		; Pick up return address
+; mov r1,sp		; BSD: move stack into data segment
+; mov r0,-(sp)
+;#else
+ mov (sp),r0		; Pick up return address
+ mov r1,sp		; Move stack into data segment
+ mov r0,-(sp)
+ clr  r0
+ trap 0			; indir()
+ equw trap39		; setpgrp(-1)
+ tst  r0
+ beq  IO_InitMemOk	; R0 unchanged, v7
+;#endif
+ 
+; Really fiddly here, as if TRAP 58 doesn't exist, program executes
+; the inline address, so that address has to be a harmless instruction
+; Needs setpgrp() or R4 check to avoid using TRAP 58
+ trap 58		; SYS local,nostk
+ equw IO_InitNoStk	; Turn stack segment off
+ add  #&04,SV_SYS	; Change UnixV7 to UnixV9
+; clr  SV_KBDFETCH+4	; BSD2.9, will use IONREAD, so don't need to set here
+ .IO_InitMemOk
+#endif
+mov  #DefaultPAGE,r0	; r0=bottom of memory
+mov  r1,SV_MEMTOP
+mov  r0,SV_MEMBOT
+rts  pc
+
+#ifndef BSD211
+.trap39
+trap 39			; setpgrp
+equw -1			; -1=read
+ .IO_InitNoStk
+ TRAP 4			; LOCAL nostck
+#endif
+
+
+; Set TTY settings
+; ================
+; Set ioctl() to change Interupt character to Escape
+; --------------------------------------------------
+; Also determine version of Unix running on and set specific settings
+;
+;				; v2.9 kbdQ is IONREAD ioctrl() exists  centisecond counter  nostk() needed
+.TTY_KBDQ7	equ  &A263	; v7   kbdQ at &A263   ioctrl() exists  centisecond counter
+;.TTY_KBDQ6	equ  &4308	; v6   kbdQ at &4308   no ioctrl()      seconds counter
+;.TTY_KBDQ5	equ  &93CA	; v5   kbdQ at &93CA   no ioctrl()      seconds counter
+;				; v4   kbdQ unknown    no ioctrl()      seconds counter
+;
+.tty_Init
+#if KBD_TICK=0
+ clrb SV_TICKER 		; Reset Escape ticker
+#else
+ movb #KBD_TICK,SV_TICKER	; Reset Escape ticker
+#endif
+#ifndef BSD211
+ ; Pre-BSD211 we need to find TTYRDY status
+ mov  #&8913,SV_KBDFETCH+0	; Store trap seek()/lseek()
+ clr  r0 			; R0=STDIN
+ sec				; Set carry to prepare for ioctrl() support
+ trap 0				; Indirect system call
+ equw tty_rdctrl 		; Point to ioctrl(stdin,TIOCGETP,SV_OSIOCTL)
+ ; This will return:
+ ; CC - Unix7, R0=??? STDIN is a tty
+ ; CS - Unix7, R0=&19 STDIN is not a tty
+ ; CS - Unix6, R0=&00 STDIN unknown call
+ ; CS - Unix5, R0=&00 STDIN unknown call
+ ;
+ bcc  tty_InitV7		; ioctl() exists, STDIN is a tty
+ tst  r0
+ bne  tty_InitV7		; R0<>0, ioctrl() does exist, STD isn't a tty, UnixV7 or BSD2.9
+ ;
+ ; Unix V5 or V6
+ clr  r2 			; R2=&00, UnixV5
+ clr  r1 			; Prepare result=0
+ trap 5				; open()
+ equw IO_TTYmem			; =>"/dev/mem"
+ equw 0				; 0=read
+ bcs  tty_Init1			; Failed to open, leave offset as zero
+ ;
+ mov  #&0030,r1
+ jsr  pc,IO_TTYfetchR1		; seek(&30), fetch !&30 to R1, eg &AC
+ jsr  pc,IO_TTYfetch4		; PTR=R1+4, seek(&B0), fetch !&B0, eg &554E
+ jsr  pc,IO_TTYfetch4		; PTR=R1+4, seek(&5552), fetch !&5552
+ bic  #&00FF,r1			; &00xx = v5, offset=0, <>&00xx = v6, offset=&16
+ beq  tty_InitV5
+ mov  #&0016,r1			; offset for v6
+ ;add  #-4,SV_KBDFETCH+2 	; Step back four bytes
+ ;;asr  r2			; R2=&04, UnixV6
+ mov  #FLG_UNIXV6,r2		; R2=&02, UnixV6
+ .tty_InitV5
+ mov  r1,-(sp)			; Save offset
+
+ .tty_InitLp
+ jsr  pc,IO_TTYfetch1
+ cmp  r1,#&65C2
+ bne  tty_InitLp 		; Search for ADD #nnnn,R2 instruction
+ jsr  pc,IO_TTYfetch1
+ cmp  r1,#&0100
+ bcs  tty_InitLp 		; Seach for offset>&00FF
+ add  (sp)+,r1			; Add saved offset from base
+ trap 6				; close()
+
+ ;add  #18-4,SV_KBDFETCH+2	; Step forward 18 or 14 bytes
+ ;jsr  pc,IO_TTYfetch		; seek(), fetch !word, final offset
+ ;trap 6			; close()
+ ;add  (sp)+,r1			; add saved offset from base
+ ;bcc  tty_InitDone
+ ;mov  #TTY_KBDQ6,r1		; Hard-wired
+
+ .tty_InitDone
+ mov  r1,SV_KBDFETCH+2		; Store offset to kbdQ
+; bisb r2,SV_SYS		; Set Unix version in flags, indicate ioctrl()/lseek()/etc Unix v7 available
+ br   tty_Init1
+ ;
+ .tty_InitV7
+; bisb #FLG_UNIXV7,SV_SYS 	; &04, UnixV7
+ ;clr  SV_KBDFETCH+2
+ mov  #TTY_KBDQ7,SV_KBDFETCH+4	; Hard-wired, offset to v7 keyboard buffer
+ mov  SV_IOCTL+0,SV_OSIOCTL+0	; Save host's Interupt/Quit characters
+ ;mov  #&1F1B,SV_IOCTL+0 	; Change SIGINT to CHR$27, SIGQUIT to CHR$31
+ movb #27,SV_IOCTL+0		; Change SIGINT to CHR$27, leave SIGQUIT as CHR$28
+ trap 54 			; ioctrl()
+ equw 0				; stdin
+ equb 17,"t"			; TIOCSETP
+ equw SV_IOCTL			; Write settings on stdin
+ mov  #FLG_UNIXV7,r2		; &04, UnixV7
+#endif
+
+; Get TTY settings and set to raw input
+; -------------------------------------
+.tty_Init1
+bisb r2,SV_SYS			; Set Unix version in flags, indicate ioctrl()/lseek()/etc Unix v7+ available
+#if FLG_NOTTY0<>1
+ #error FLG_NOTTY0 must be &01
+#endif
+#ifdef BSD211
+ mov  #SV_TTY,-(sp)		; =>argbuf
+ mov  #ASC"t"*256+8,-(sp)	; TIOCGETP
+ mov  #&o40006,-(sp)		; b14=get, b7-b0=6 bytes to read
+ clr  -(sp)			; 0=STDIN
+ clr  -(sp)			; Padding
+ trap 54			; ioctrl()
+ add  #10,sp			; Drop from stack
+#else
+ rorb SV_SYS			; Move bit 0 out of flags
+ clr  r0			; R0=STDIN
+ trap 32			; gtty()
+ equw SV_TTY			; Read host's TTY setting
+ rolb SV_SYS			; Move NotTTY flag into bit 0 of flags
+#endif
+mov  SV_TTY+4,SV_OSTTY		; Save host's TTY flags
+				; Continue to set raw TTY
+
+; Set TTY to raw for input within BASIC
+; -------------------------------------
+.tty_raw
+mov  SV_OSTTY,r0
+#ifndef ESCPOLL
+ bis  #2,r0			; CBreak on -- raw, but with INT and QUIT working
+ bic  #&FF00+32+16+8,r0		; NoDelay+Raw+CRMod+Echo off
+ bitb #FLG_UNIXNEW,SV_SYS	; Are we running on Unix7 or later?
+ bne  tty_set			; Jump to set 'Cooked' for v7+
+ bic  #2,r0			; Remove 'Cooked'
+ bis  #32,r0			; Set 'Raw'
+ br   tty_set			; Jump to set 'Raw' for pre-v7
+#else
+ bic  #&FF00+16+8+2,r0		; NoDelay+Raw+CRMod+Echo off
+ bis  #32,r0			; Set 'Raw'
+ br   tty_set			; Jump to set it
+#endif
+
+;.tty_quit
+; trap 36			; sync(), update open files
+; bitb #FLG_UNIXVER,SV_SYS	; Does ioctl() need setting?
+; bne  UNIX_QUITtty		; Skip if not Unix7
+; mov  SV_OSIOCTL,SV_IOCTL	; Get host's TTY chars
+; trap 54			; ioctrl()
+; equw 0			; stdin
+; equb 17,"t"			; TIOCSETP
+; equw SV_IOCTL			; Restore host TTY characters
+; .UNIX_QUITtty
+
+
+; Set TTY to host's saved setting for host calls
+; -----------------------------------------------
+.tty_host
+mov  SV_OSTTY,r0		; Get hosts' TTY flags
+.tty_set
+#ifdef BSD211
+ mov  r0,SV_TTY+4
+ mov  #SV_TTY,-(sp)		; =>argbuf
+ mov  #ASC"t"*256+9,-(sp)	; TIOCSETP
+ mov  #&o100006,-(sp)		; b15=set,b14=get,b13=none, b7-b0=size
+ clr  -(sp)			; 0=STDIN
+ clr  -(sp)			; Padding
+ trap 54			; ioctrl()
+ add  #10,sp			; Drop from stack
+#else
+ mov  r0,SV_TTY+4
+ clr  r0			; 0=STDIN
+ trap 31			; stty()
+ equw SV_TTY			; Set TTY setting
+#endif
+rts  pc
+
+#ifndef BSD211
+ .tty_rdctrl
+ trap 54 			; ioctrl()
+ equw 0				; stdin
+ equb 18,"t"			; TIOCGETP
+ equw SV_IOCTL			; Read settings on stdin
+#endif
+
+; Signal handlers
+; ===============
+; On entry to signal handler, all registers are exposed, except PS which is stacked
+; 0=Quit, 1=Ignore, else=handler
+;
+.sig_Handlers
+#ifndef BSD211
+equw 0 ;Catch_SIGHUP	; SIGHUP  1	hangup 			QUIT
+ #ifdef ESCPOLL
+  equw 1 ;Catch_SIGINT	; SIGINT  2	interrupt (escape) 	IGNORE
+ #else
+  equw Catch_SIGINT	; SIGINT  2	interrupt (escape) 	Set ESCFLG
+ #endif
+ equw Catch_SIGQUIT	; SIGQIT  3	quit (FS) 		QUIT cleanly
+ equw 0 ;Catch_SIGINS	; SIGINS  4	illegal instruction 	QUIT/Error &F0,Undefined instruction
+ equw 0 ;Catch_SIGTRC	; SIGTRC  5	trace or breakpoint 	QUIT/Error &F1,Breakpoint
+ equw 0 ;Catch_SIGIOT	; SIGIOT  6	iot 			QUIT/Error &F4,Unknown IRQ
+ equw Catch_SIGEMT	; SIGEMT  7	emt 			Return CS
+ equw 0 ;Catch_SIGFPT	; SIGFPT  8	floating point error	QUIT
+ equw Catch_SIGKILL	; SIGKIL  9	kill 			QUIT (uncatchable)
+ equw Catch_SIGBUS	; SIGBUS  10	bus error 		Error &F3,Bad word access
+ equw Catch_SIGSEG	; SIGSEG  11	segmentation violation 	Error &F2,Bad memory access
+ equw Catch_SIGSYS	; SIGSYS  12	bad sys (trap) call	Return CS
+ equw 0 ;Catch_SIGPIPE	; SIGPIPE 13	end of pipe 		QUIT
+ equw 0 ;Catch_SIGALRM	; SIGALRM 14	alarm	 		QUIT
+#else
+ equw  1,Catch_SIGHUP	; SIGHUP  1	hangup			QUIT cleanly
+ equw  2,1		; SIGINT  2	interrupt (escape) 	IGNORE
+ equw  3,Catch_SIGQUIT	; SIGQIT  3	quit (FS) 		QUIT cleanly
+ equw  7,1		; SIGEMT  7	emt 			IGNORE
+ equw  9,Catch_SIGKILL	; SIGKIL  9	kill 			QUIT cleanly (uncatchable)
+ equw 10,errSIGBUS	; SIGBUS  10	bus error 		Error &F3,Bad word access
+ equw 11,errSIGSEG	; SIGSEG  11	segmentation violation 	Error &F2,Bad memory access
+ equw 12,1		; SIGSYS  12	bad sys (trap) call	IGNORE
+ equw 0
+#endif
+
+; Catch signal
+; ------------
+; R0=signal number, action found from sig_Handler table
+#ifdef BSD211
+sigtramp:
+ mov	sp,r1
+ add	#6,r1
+ mov	r1,-(sp)
+ tst	-(sp)
+ mov	r0,14(r1)	; Redirect return to an error
+ trap	103		; sigreturn()
+ halt
+#else
+ .sig_Catch
+ mov  #&8930,TRAP_BUF+0	; SYS signal
+ mov  r0,TRAP_BUF+2	; signal number
+ asl  r0
+ mov  sig_Handlers-2(r0),TRAP_BUF+4
+ trap 0
+ equw TRAP_BUF
+ rts  pc
+#endif
+
+; Unknown TRAP (Unix SYS) call
+; ----------------------------
+; Don't need to preserve R0,R1 as they are corrupted by a SYS call anyway
+; BSD211 must return via sigreturn(), stack doesn't have return info.
+#ifndef BSD211
+ .Catch_SIGSYS
+ mov  #12,r0
+ jsr  pc,sig_Catch	; Reconnect handler
+ bis  #1,2(sp)		; Set returned carry flag
+ rti
+ 
+ ; EMT call
+ ; --------
+ ; If these translate into IO_xxxx calls, need to check to prevent looping
+ .Catch_SIGEMT
+ mov  r0,-(sp)
+ mov  #7,r0
+ br   Catch_SIGRestore
+ 
+ ; Escape pressed
+ ; --------------
+ ; On pre-Unix7, in RAW mode, this will NEVER get called!
+ ;
+ #ifndef ESCPOLL
+  .Catch_SIGINT
+  mov  r0,-(sp)
+  bitb #FLG_ESCAPE,SV_SYS 	; Is Escape disabled?
+  bne  Catch_SIGINTchar		; Push <esc> into keyboard buffer
+  jsr  pc,KBD_TestKeyDelay	; r0=0 if nothing pending
+  bne  Catch_SIGINTchar		; Push <esc> into keyboard buffer
+  movb #&FF,SV_ESCFLG		; Set local Escape flag
+  br   Catch_SIGINTpush		; Reclaim SIGINT
+  .Catch_SIGINTchar
+  mov  #27*256+1,r0		; Prepare key=CHR$27, queue=1
+  .Catch_SIGINTpush
+  mov  r0,SV_KBDQ 		; Set or clear keyqueue and pending keypress
+  mov  #2,r0			; R0=SIGINT
+ #endif
+ ;
+ .Catch_SIGRestore
+ mov  r1,-(sp)
+ jsr  pc,sig_Catch		; Reconnect handler
+ mov  (sp)+,r1
+ mov  (sp)+,r0
+ rti
+#endif
+
+; Don't need to preserve any registers for the following as they just
+; jump to the error handler.
+; Does BSD need to adjust return block to cause return to error handler?
+
+; Access to nonexistent memory
+; ----------------------------
+#ifndef BSD211
+ .Catch_SIGSEG
+ mov  #11,r0
+ jsr  pc,sig_Catch	; Reconnect handler
+#endif
+.errSIGSEG
+jsr  pc,ErrorHandler1
+equb &F2,"Bad memory access",0
+align
+
+; Word access to odd address
+; --------------------------
+#ifndef BSD211
+ .Catch_SIGBUS
+ mov  #10,r0
+ jsr  pc,sig_Catch	; Reconnect handler
+#endif
+.errSIGBUS
+jsr  pc,ErrorHandler1
+equb &F3,"Bad word access",0
+align
+
+; IOT interupt
+; ------------
+;.Catch_SIGIOT
+;mov  #6,r0
+;jsr  pc,sig_Catch	; Reconnect handler
+;jsr  pc,CatchSaveRegs
+;.errSIGIOT
+;jsr  pc,ErrorHandler1
+;equb &F4,"Unknown IRQ",0
+;align
+
+; Breakpoint
+; ----------
+;.Catch_SIGTRC
+;mov  #5,r0
+;jsr  pc,sig_Catch	; Reconnect handler
+;jsr  pc,CatchSaveRegs
+;.errSIGTRC
+;jsr  pc,ErrorHandler1
+;equb &F1,"Breakpoint",0
+;align
+
+; Illegal instruction
+; -------------------
+;.Catch_SIGINS
+;mov  #4,r0
+;jsr  pc,sig_Catch	; Reconnect handler
+;jsr  pc,CatchSaveRegs
+;.errSIGINS
+;jsr  pc,ErrorHandler1
+;equb &F0,"Undefined instruction",0
+;align
+
+
+; IO calls translated to UNIX TRAPs
+; =================================
+
+; OSCLI - Execute a command
+; =========================
+; On entry, R0=>command string
+;
+.IO_CLI 	EQU  IO_OSCLI	; Execute command
+
+
+; OSQUIT - Quit execution
+; =======================
+; On entry, R0=exit status
+;
+.Catch_SIGQUIT
+JSR  PC,IO_NEWL
+.Catch_SIGKILL
+.Catch_SIGPIPE
+.Catch_SIGFPT
+.Catch_SIGHUP
+.Catch_SIGTRC
+.Catch_SIGINS
+.Catch_SIGIOT
+.IO_QUIT0
+CLR  R0				; Quit with status=0
+.IO_QUIT
+mov  r0,-(sp)			; Save exit status
+trap 36				; sync(), update open files
+#ifdef BSD211
+ jsr  pc,tty_host		; Restore host TTY settings
+ mov  (sp),r0			; Get exit status back
+ trap 1				; exit()
+ tst  (sp)+			; Drop padding
+#else
+ bitb #FLG_UNIXNEW,SV_SYS	; Does ioctl() need setting?
+ beq  UNIX_QUITtty		; Skip if not Unix7
+ mov  SV_OSIOCTL,SV_IOCTL	; Get host's TTY chars
+ trap 54			; ioctrl()
+ equw 0				; stdin
+ equb 17,"t"			; TIOCSETP
+ equw SV_IOCTL			; Restore host TTY characters
+ .UNIX_QUITtty
+ jsr  pc,tty_host		; Restore host TTY settings
+ mov  (sp)+,r0			; Get exit status back
+ trap 1				; exit(r0)
+#endif
+rts  pc				; In case returns
+
+
+; Host-specific commands
+; ======================
+
+; *cd <directory>
+; ---------------
+.CLIchdir
+jsr  pc,UX_StringCopy	; Convert whole string at R0 to null-string at R1 (could be space-terminated)
+#ifdef BSD211
+ mov  r1,-(sp)		; dirname
+ clr  -(sp)		; padding
+ trap 12		; chdir(dirname)
+ mov  (sp)+,r1		; Drop padding without changing Carry (tst clears Cy)
+#else
+ mov  r1,TRAP_BUF+2	; dirname
+ mov  #&890C,TRAP_BUF	; chdir()
+ trap 0			; indir()
+ EQUW TRAP_BUF		; chdir(dirname)
+#endif
+bcc  CLIchdirok		 ; No error
+mov  #msgFileNotFound,r0 ; Must have been dir not found
+jmp ErrorHandler
+
+; Command doesn't match or */name, pass to system()
+; -------------------------------------------------
+; r0=>start of command name
+; sp=>saved R1
+.IO_CLIslash
+mov  r0,r1
+trap 2			; fork()
+br   UX_CLIchild	; Child process returns here
+bcs  errBadCommand	; Parent process returns here, R0=child PID
+#ifdef BSD211
+ clr  -(sp)		; status
+ mov  sp,r1		; r1=>status
+ clr  -(sp)		; 0
+ clr  -(sp)		; 0
+ mov  r1,-(sp)		; =>status
+ mov  #-1,-(sp)		; -1
+#endif
+mov  r0,-(sp)		; Save child's PID
+.UX_CLIwait
+trap 7			; wait(-1,&status,0,0)
+cmp  r0,(sp)
+beq  UX_CLIfinished
+cmp  r0,#&FFFF		; Could be 'inc' as R0 not later used
+bne  UX_CLIwait		; Loop until child finished
+.UX_CLIfinished
+#ifdef BSD211
+ add  #2*6,sp		; Drop from stack
+#else
+ tst  (sp)+		; Drop child's PID
+#endif
+.UX_CLIreturn
+jsr  pc,tty_raw		; Restore to BASIC's TTY settings
+swab r1			; Move return value to bottom byte
+mov  r1,r0		; R0=return value
+mov  (sp)+,r1		; Restore R1
+.CLIchdirok
+rts  pc
+
+; CLI child process
+; -----------------
+.UX_CLIchild
+jsr  pc,UX_StringCopyR1	; Convert whole string at R1 to null-string at R1
+cmpb (r1),#ASC"."
+bne  UX_CLIchild2	; Not *.
+mov  #UXsh4,r1		; Replace *. with *ls -l or *ls
+.UX_CLIchild2
+jsr  pc,tty_host	; Use host's TTY settings, corrupts R0
+jsr  pc,UNIX_WRCH0	; Output VDU 0 to toggle LineFeed flag
+; *NOTE* Output from exec() call will go through BASIC's output.
+; So if bbcbasic | ansi, output will go through ansi. This means
+; <lf> will only be <lf> if ansi translates to pure <lf> without <cr>.
+; GRRRR
+; Need to send a signal to ansi driver without changing display
+; output. Eg OSCLI "rm "+n$ must normally not create any output.
+;
+clr  -(sp)		; end of string array
+mov  r1,-(sp)		; => command string
+mov  #UXsh3,-(sp)	; => "-c"
+mov  #UXsh2,-(sp)	; => "sh"
+#ifdef BSD211
+ mov  sp,r1			; r1=>list of string pointers
+ mov  r1,-(sp)			; =>list of string pointers
+ mov #UXsh1,-(sp)		; =>"/bin/sh"
+ clr -(sp)			; padding
+ trap 11			; execv("/bin/sh", =>parameters)
+ add #2*7,sp			; Drop parameters
+#else
+ mov  #&890B,TRAP_BUF+0		; exec
+ mov  #UXsh1,TRAP_BUF+2		; => "/bin/sh"
+ mov  sp,TRAP_BUF+4		; => pointers to command strings
+ ;mov  SV_ENVPTR,TRAP_BUF+6	; => "PATH=etc" - not used in exec() call,
+				;    used in exece() which is not present in v6
+ trap 0				; indir()
+ EQUW TRAP_BUF			; exec(shell, parameters)
+ mov  r0,r1			; If we get back, we didn't fork, we spawned
+ add  #2*4,sp			; Drop parameters
+#endif
+jsr  pc,UNIX_WRCH0		; Output VDU 0 to toggle LineFeed flag back
+br   UX_CLIreturn		; So, restore registers and tty, and return
+
+.UXsh1	EQUS "/bin/sh",0
+.UXsh2	EQUS "sh",0
+.UXsh3	EQUS "-c",0
+#ifdef BSD211
+.UXsh4	EQUS "ls 1>&2",0
+#else
+.UXsh4	EQUS "ls -l",0
+#endif
+.errBadCommand
+jsr  pc,Error
+equb 254,"Bad command",0
+ALIGN
+
+
+; OSBYTE - Host calls with byte parameters
+; ========================================
+.IO_BYTE
+mov  r0,-(sp)		; Save R0
+jsr  pc,IO_BYTEgo	; Returns R0=return value
+mov  r0,r1		; Place it in correct register
+mov  (sp)+,r0
+rts  pc
+.IO_BYTEgo
+cmp  r0,#&81
+beq  IO_INKEY		; =INKEY
+cmp  r0,#&80
+beq  IO_ADVAL		; =ADVAL
+cmp  r0,#&7F
+beq  IO_EOF		; =EOF
+tst  r0
+bne  IO_BYTEbbc		; Not OSBYTE 0, try to pass to BBC host
+
+; Read host system type
+; ---------------------
+.IO_BYTE0
+mov  #8,r1		; r1=8 for Unix
+.IO_BYTEbbc
+#ifndef NOEMT
+ emt  2			; Pass call to BBC host
+#endif
+.IO_BYTEok
+mov  r1,r0		; Return it in R0 for caller
+rts  pc
+
+; OSINKEY - Timed wait for character from input stream
+; ====================================================
+; On entry, R1=timeout
+; On exit,  R1=character
+;           CC=ok
+;           CS=escape or timeout
+;           R1=27        R1=-1
+;
+.IO_INKEY
+tst  r1			; Negative INKEY?
+bmi  IO_INKEYneg	; INKEY -num with R1=&FFxx
+jsr  pc,IO_GETKEY0
+;bvc  IO_INKEYdone	; Should test for keypress
+; Should test timeout
+;mov  #&FFFF,r0		; No key pressed
+;sec			; No key pressed
+rts  pc			; Return R0 and restore
+;
+; Read machine type
+; -----------------
+.IO_INKEYneg
+#ifndef NOEMT
+ sec
+ emt  2			; First try BBC host
+ bcc  IO_BYTEok		; It responded, return what it returned
+#endif
+; NB, INKEY is allowed to return Cy set (eg timeout), this treats Cy=1 as 'unsupported'
+clr  r0			; Prepare 'key not pressed'
+cmp  r1,#&FF00
+bne  IO_INKEYdone	; Not INKEY-256, return R1=0
+#ifdef BSD211
+ mov  #&00BB,r0		; &BB = BSD2.11
+#else
+ movb SV_SYS,r0
+ bic  #-FLG_UNIXVER-1,r0 ; Keep Unix version flags
+ ror  r0		 ; Move to b0-b1
+ bne  IO_INKEY4		 ; Not Unix v4/v5
+ trap 20		 ; getpid
+ mov  #0,r0		 ; R0=0, don't change Carry
+ sbc  r0		 ; R0=-1 if getpid() call failed, UnixV4
+.IO_INKEY4
+ add  #&B5,r0
+#endif
+.IO_INKEYdone
+rts  pc			; Return R0 and restore
+
+; =ADVAL
+; ------
+.IO_ADVAL
+cmpb r1,#255
+beq  IO_ADVALkbd	; ADVAL(-1)
+cmpb r1,#127
+bne  IO_BYTEok		; Not ADVAL(128-1), exit
+jmp  KBD_GETKEYBUF	; Wait for deep keypress
+;.IO_ADVALlp
+;jsr  pc,KBD_GETKEYBUF	; Wait for deep keypress
+;bvs  IO_ADVALlp	; Current version always waits
+;rts  pc 		; Restore R0 and return
+.IO_ADVALkbd
+jmp  KBD_TestKeyDelay ; R0=keys pending
+
+; Read EOF status
+; ---------------
+.IO_EOF
+mov  r3,-(sp)		; Save R3
+mov  r2,-(sp)		; Save R2
+mov  r1,r3		; R3=channel
+jsr  pc,UX_ArgsRdEof	; Read EOF to r0/r1
+mov  (sp)+,r2		; Restore R2
+mov  (sp)+,r3		; Restore R3
+rts  pc			; Return R0 and restore
+
+
+; OSWORD - Host calls with parameters in control block
+; ====================================================
+; On entry, R0=action
+;           R1=>control block
+; On exit,  All registers undefined
+;
+;  0 - Read line
+;  1 - Read TIME
+;  2 - Write TIME
+;  3 - Read SYSTIME
+;  4 - Write SYSTIME
+;  5 - Read from memory
+;  6 - Write to memory
+;  7 - SOUND
+;  8 - ENVELOPE
+;  9 - POINT
+; 10 - Character definition
+; 11 - Read palette
+; 12 - Write palette
+; 13 - Read graphics positions
+; 14 - Read TIME$
+; 15 - Write TIME$
+.IO_WORD
+cmp  r0,#1
+beq  UNIX_WORD1		; OSWORD 1 - Read TIME
+bcc  UNIX_NOTWORD
+JMP  IO_WORD0		; OSWORD 0 - Read line
+
+#ifndef NOEMT
+ .UNIX_NOTWORD
+ emt  3			; Ask host to do OSWORD call
+ rts  pc
+#endif
+
+; Read TIME
+; ---------
+.UNIX_WORD1
+; On entry, R1=>5-byte block to read time to
+; On exit,  R1=>centisecond time
+;
+mov  r0,-(sp)		; Save registers
+mov  r2,-(sp)
+mov  r3,-(sp)
+mov  r4,-(sp)
+mov  r1,-(sp)		; Save buffer pointer at top of stack
+#ifdef BSD211
+; mov  #SV_KBDFETCH+8,-(sp) ; timezone[4], overlaps TRAP_BUF
+ clr  -(sp)		; Don't fetch timezone
+ mov  #SV_KBDFETCH+0,-(sp) ; tv_sec[4], tv_usec[4]
+ clr  -(sp)		; Padding
+ trap 116		; SYS gettimeofday
+ add  #6,sp		; Drop from stack
+ mov  SV_KBDFETCH+4,r0	; Close to 1/16th of a second
+ mov  r0,r1
+ add  r0,r0		; r0=us*2
+ add  r1,r0		; r0=us*3
+ add  r0,r0		; r0=us*6 - close enough to centiseconds
+ mov  SV_KBDFETCH+2,r4	; r4=seconds
+			; Continue to do r4*100+r0
+#else
+ bitb #FLG_UNIXNEW,SV_SYS; Are we running on Unix7 or later?
+ beq  UX_WORD1b		; No, read one-second time
+ ;sec
+ TRAP 35		; Read millisecond time
+ EQUW TRAP_BUF		; This is sleep() on Unix6
+ ;bcs  UX_WORD1b	; Not supported, read one-second time
+ adr  TRAP_BUF+2,r0
+ mov  (r0)+,r4		; One-second count
+ mov  (r0),r2		; Millisecond count
+ clr  r0
+ .UX_WORD1lp
+ inc  r0		; Convert millseconds into centiseconds
+ sub  #10,r2		; Divide by 10
+ bcc  UX_WORD1lp	; r0=r2/10
+ dec  r0
+ br   UX_WORD1c		; Calculate add seconds and centiseconds
+ .UX_WORD1b
+ TRAP 13		; Read one-second time to r1:r0
+ mov  r1,r4
+ ;mov  r0,r3
+ clr  r0		; Centisecond count = 0
+#endif
+.UX_WORD1c
+clr  r3			; Restrict range to prevent overflows, wraps at 45.5days
+jsr  pc,EvalTimes10	; Multiply one-second count by 100
+jsr  pc,EvalTimes10	; r3:r4=r3:r4*10, corrupts r1,r2
+add  r0,r4		; Add centisecond count
+adc  r3
+mov  (sp),r1		; Get buffer pointer back
+clr  r2			; b32-b39=zero
+mov  #5,r0		; 5 bytes
+jsr  pc,cmdAssignNumber1 ; Store r4/r3/r2 in memory at r1
+mov  (sp)+,r1		; Restore buffer pointer
+mov  (sp)+,r4		; Restore registers
+mov  (sp)+,r3
+mov  (sp)+,r2
+mov  (sp)+,r0
+#ifdef NOEMT
+ .UNIX_NOTWORD
+#endif
+rts  pc
+
+
+; OSRDCH - Wait for character from input stream
+; =============================================
+; On exit,  R0=character
+;           CC=not escape, CS=escape
+;
+;.IO_RDCH
+;jsr  pc,IO_GETKEY0	; Test for waiting keypress
+;bvs  IO_RDCH		; Loop until key pressed
+;rts  pc
+
+; Read from keyboard input
+; ------------------------
+; On exit: VS=No keypress
+;          VC=Key press returned
+;            R0=8-bit character code
+;            CC=Not Escape
+;            CS=Escape and ESCFLG set if enabled
+;
+.IO_RDCH	
+.IO_GETKEY0
+tstb SV_ESCFLG		; Pending Escape state?	; V cleared, C cleared
+bmi  IO_GETKEYesc	; Escape pending
+jsr  pc,KBD_GETKEYBUF	; Read from keyboard
+tstb SV_ESCFLG
+bmi  IO_GETKEYesc	; Pending Escape
+bic  #&FF00,r0		; Ensure 8-bit keycode	; V cleared, C unchanged
+cmp  r0,#27		; Check for CHR$27	; V cleared, C unknown
+clc			;			; V cleared, C cleared
+bne  IO_GETKEYdone	; Return with CC if not CHR$27
+bitb #FLG_NOTTY0+FLG_ESCAPE,SV_SYS		; V cleared, C unchanged
+bne  IO_GETKEYdone	; If not a TTY, or Escape disabled, return with CC
+movb #&FF,SV_ESCFLG	; Set Escape flag
+.IO_GETKEYesc
+sec			; CS=Escape
+jmp  KBD_GETKEYesc	; Return R0=27
+
+;clc
+;;bvs  IO_GETKEYdone	; No keypress, exit - current version always waits
+;bic  #&FF00,r0		; Ensure 8-bit keycode	; V cleared, C unchanged
+;bitb #FLG_NOTTY0+FLG_ESCAPE,SV_SYS		; V cleared, C unchanged
+;bne  IO_GETKEYdone	; If not a TTY, or Escape disabled, return
+;cmp  r0,#27		; Check for CHR$27	; V cleared, C unknown
+;clc			;			; V cleared, C cleared
+;bne  IO_GETKEYdone	; Return CC if not CHR$27
+;movb #&FF,SV_ESCFLG	; Set Escape flag
+;.IO_GETKEYesc
+;jmp  KBD_GETKEYesc
+
+
+; OSASCI, OSNEWL - Output newline to output stream
+; ================================================
+.UNIX_WRCH0
+clr  r0			; Output VDU 0
+.IO_ASCI
+CMP  R0,#13		; Print ASCII character
+BNE  IO_WRCH		; Not <cr>, output it
+.IO_NEWL
+MOV  #10,R0		; Output <lf><cr>
+JSR  PC,IO_WRCH
+.IO_WRCR
+MOV  #13,R0		; Output <cr>
+			; Fall through to...
+
+; OSWRCH - Output character to output stream
+; ==========================================
+; On entry, R0=character
+; On exit,  all registers preserved
+;
+.IO_WRCH
+mov  r1,-(sp)		; Save R1
+mov  #1,r1		; Output to channel 1 for VDU
+br   UNIX_BPUT1		; Continue into BPUT
+
+
+; OSBPUT - Write a single byte
+; ============================
+; On entry, R0=byte to write
+;           R1=handle
+; On exit,  All preserved
+;
+.IO_BPUT
+#ifdef BSD211
+ mov  r1,-(sp)		; Save channel
+ .UNIX_BPUT1
+ sec
+ br   IO_RDWR
+#else
+ mov  r1,-(sp)		; Save channel
+ .UNIX_BPUT1
+ mov  r0,-(sp)		; Save character
+ movb r0,CHAR_BUF	; Store char in buffer
+ mov  r1,r0		; r0=handle
+ trap 4			; write()
+ equw CHAR_BUF		; address=buffer
+ equw 1			; count=1
+ mov  (sp)+,r0		; Restore r0
+ mov  (sp)+,r1		; Restore r1
+ rts  pc
+#endif
+
+
+; OSBGET - Read a single byte
+; ===========================
+; On entry, R1=handle
+; On exit,  R0=byte read
+;
+#ifdef BSD211
+.UNIX_BGET0
+ mov  r1,-(sp)		; Save R1
+ clr  r1		; Read from STDIN
+ br   UNIX_BGET1
+.IO_BGET
+ mov  r1,-(sp)		; Save handle
+.UNIX_BGET1
+ clr  r0		; Clear Carry and prepare character=&0000
+.IO_RDWR		; CLC=BGET, SEC=BPUT
+ mov  r0,-(sp)		; Save character or make space
+ mov  sp,r0		; r0=>character space
+ mov  #1,-(sp)		; length
+ mov  r0,-(sp)		; =>character
+ mov  r1,-(sp)		; channel
+ mov  r1,-(sp)		; padding, don't change Carry
+ bcc  IO_READ		; CLC=read
+ trap 4			; write()
+ cmp  (sp)+,(sp)+	; Drop padding and channel
+ cmp  (sp)+,(sp)+	; Drop pointer and length
+ br   IO_NOTEOF3	; Skip EOF processing for writing
+.IO_READ
+ trap 3			; read()
+ mov  (sp)+,r1		; Remove padding
+ mov  (sp)+,r1		; R1=channel used
+ cmp  (sp)+,(sp)+	; Drop pointer and length
+ tst  r0		; Test count of bytes returned, clears Carry
+ bne  IO_NOTEOF2	; Not EOF, return with CLC
+ mov  #254,(sp)		; Replace with -2=EOF
+ movb SV_RDWRFLAGS,r0	; Get last channel used
+ movb r1,SV_RDWRFLAGS	; Set last channel used
+ cmpb r1,r0		; Was last call on this channel?
+ sec
+ bne  IO_NOTEOF3 	; Not yet reported EOF, return with R0=-2, SEC
+ jsr  pc,Error
+ equb &DF,"EOF",0
+ align
+.IO_NOTEOF2
+ clrb SV_RDWRFLAGS	; Clear 'already returned EOF' flag, clear carry
+.IO_NOTEOF3
+ mov  (sp)+,r0		; Get or restore character
+ mov  (sp)+,r1		; Restore r1
+#else
+.UNIX_BGET0
+ clr  r0		; Read from STDIN
+ br   UNIX_BGET1
+.IO_BGET
+ mov  r1,r0		; R0=handle
+.UNIX_BGET1
+ clr  CHAR_BUF
+ mov  r1,-(sp)		; Save channel
+ trap 3			; read()
+ equw CHAR_BUF		; address=buffer
+ equw 1			; count=1
+;;;
+ tst  r0		; Test count of bytes returned, clears Carry
+ bne  IO_NOTEOF2	; Byte returned, return it with CLC
+ mov  #254,r0		; Replace with -2=EOF
+ movb SV_RDWRFLAGS,r1	; Get 'already returned EOF' flag
+ movb (sp),SV_RDWRFLAGS	; Set 'already returned EOF' flag
+ cmpb (sp),r1		; Have we already returned EOF on this channel?
+ sec
+ bne  IO_NOTEOF3 	; Not yet returned EOF, return with R0=-2, SEC
+ jsr  pc,Error
+ equb &DF,"EOF",0
+ align
+.IO_NOTEOF2
+ clrb SV_RDWRFLAGS	; Clear 'already returned EOF' flag, clear carry
+ mov  CHAR_BUF,r0	; Fetch char from buffer, b8-b15 already cleared
+.IO_NOTEOF3
+ mov  (sp)+,r1		; Restore channel
+;;; 18
+; tst  r0		; Test count of bytes returned, clears Carry
+; bne  IO_NOTEOF2	; Not at EOF, return with CLC
+; mov  #254,CHAR_BUF	; Replace with -2=EOF
+; cmpb (sp),SV_RDWRFLAGS
+; sec
+; bne  IO_NOTEOF1 	; At EOF, return with R0=-2, SEC
+; jsr  pc,Error
+; equb &DF,"EOF",0
+; align
+;.IO_NOTEOF1
+; movb (sp),SV_RDWRFLAGS	; Last channel used
+;.IO_NOTEOF2
+; mov  (sp)+,r1		; Restore channel
+; mov  CHAR_BUF,r0	; Fetch char from buffer, b8-b15 already cleared
+;;; 16
+#endif
+.IO_GETKEYdone
+rts  pc
+
+
+; OSFIND - Open/close a file
+; ==========================
+; On entry, close: R0=0, R1=handle
+;           open:  R0<>0, R1=>filename
+; On exit,  close: all preserved
+;           open:  R0=handle
+;                  R1 preserved
+;
+.IO_FIND
+tst  r0
+bne  UX_OPEN
+mov  r1,r0		; r0=handle
+;beq UX_CLOSEall	; to do: close all
+; Fall through to close R0
+
+.UX_CloseR0
+cmp  r0,#3
+bcs  UX_CloseExit	; Don't close STDIN/STDOUT/STERR
+#ifdef BSD211
+ mov  r0,-(sp)		; handle
+ clr  -(sp)		; padding
+ trap 6			; close(handle)
+ cmp  (sp)+,(sp)+	; drop parameters
+#else
+ trap 6			; close(handle)
+#endif
+.UX_CloseExit
+clr  r0			; R0=0 for CLOSE
+rts  pc
+
+.UX_OPEN
+rol  r0
+rol  r0
+swab r0
+bic  #&FFFC,r0		; r0=1/2/3
+dec  r0			; r0=0/1/2
+.UX_OPEN2
+jsr  pc,UX_StringSpc	; Convert to null-string terminated by space or control, R0 preserved
+#ifdef BSD211
+ ; O_RDONLY=&o00000
+ ; O_WRONLY=&o00001
+ ; O_RDWR  =&o00002
+ ; O_CREAT =&o01000
+ mov  #&o666,-(sp)	; mode wr-wr-wr-
+ mov  r0,-(sp)		; flags, 0=openin, 1=openout, 2=openup
+ dec  r0		; r0=-1/0/1
+ bne  UX_Open3		; Jump to do openin/openup
+ mov  #&o01001,(sp)	; Replace with O_CREATE+O_WRONLY for openout
+ .UX_Open3
+ mov  r1,-(sp)		; filename
+ clr  -(sp)		; padding
+ trap 5			; open(filename,flags,mode)
+ rol  r0		; save Carry
+ add  #8,sp		; drop parameters, clear carry
+ ror  r0		; get Carry and handle back
+#else
+ mov  #&8905,TRAP_BUF	; trap 5 - open()
+ mov  r1,TRAP_BUF+2	; filename
+ mov  r0,TRAP_BUF+4	; action
+ dec  r0		; r0=-1/0/1
+ bne  UX_Open3		; Jump to do openin/openup
+ mov  #&8908,TRAP_BUF+0	; Change to trap 8 - creat() for openout
+ mov  #&o666,TRAP_BUF+4	; mode wr-wr-wr-
+ .UX_Open3
+ trap 0			; indir()
+ equw TRAP_BUF		; r0=open(filename,input) or r0=creat(filename,mode)
+#endif
+bcc  UX_OpenOk
+clr  r0			; Nothing opened, return R0=0
+.UX_OpenOk
+tst  r0			; Set EQ from R0
+rts  pc
+
+
+; OSARGS - Read/write open file information
+; =========================================
+; On entry, R0=action
+;           R1=channel
+;           R2=>data word
+; On exit,  R0=filing system number (for R0=0,R1=0)
+;           R0<>0 if function doesn't exist (returns R0 preserved)
+;           R0=0 if function supported
+;           R1=preserved
+;           R2=preserved
+;           r2=>updated data word
+;
+; When called from BASIC, there will be at least 224 bytes available
+; on the stack due to the 256-byte check on entry to Evaluator
+;
+.IO_ARGS
+cmpb r0,#255
+beq  UX_ArgsFF		; ARGS &FF - Update files
+tst  r1
+bne  UX_ARGS		; Handle<>0, open file information
+tst  r0
+bne  UX_ARGSbbc		; Not read FS number, pass on to BBC vector
+#ifndef BSD211
+ #ifndef NOEMT
+  sec			; Prepare SEC for EMT call
+  emt  8		; Check for BBC host
+  bcc  UX_FSok		; BBC responded, use it
+ #endif
+#endif
+mov  #24,r0		; R0=24 for UnixFS
+.UX_FSok
+rts  pc
+
+.UX_ArgsFF
+trap 36			; sync()
+clr  r0			; R0=0 - call actioned
+.UX_ARGSbbc
+rts  pc
+
+.UX_ARGS
+;  0  - =PTR
+;  1  - PTR=
+;  2  - =EXT
+;  3  - EXT=
+;  4  - =Alloc -> =EXT
+;  5  - =EOF
+;  6  - Alloc= -> EXT=
+cmp  r0,#7
+bcc  UX_ARGSbbc		; Unrecognised, pass to BBC vector
+mov  r3,-(sp)		; Save R3
+mov  r1,r3		; R3=handle
+mov  r2,-(sp)		; Save R2=>data
+mov  r0,-(sp)		; Save R0=action
+jsr  pc,FetchWord	; R0/R1=[R2], fetch data word, r2=r2+4, R1=lo, R0=hi
+mov  (sp)+,r2		; Get action back to R2
+jsr  pc,UX_ArgsDispatch
+mov  (sp),r2		; Get R2=>data
+jsr  pc,StoreWord	; [R2]=R0/R1, store data word, r2=r2+4, R1=lo, R0=hi
+mov  (sp)+,r2		; Restore R2=>data
+mov  r3,r1		; Restore R1
+mov  (sp)+,r3		; Restore R3
+clr  r0			; R0=0 - call actioned
+rts  pc
+
+; R0/R1=data word, R2=action, R3=channel
+; --------------------------------------
+.UX_ArgsDispatch
+cmp  r2,#5
+beq  UX_ArgsRdEof	; 5 - =EOF
+bcc  UX_ArgsWrExt	; 6 - Alloc=
+cmp  r2,#3
+beq  UX_ArgsWrExt	; 3 - EXT=
+bcc  UX_ArgsRdExt	; 4 - =Alloc
+cmp  r2,#1
+beq  UX_ArgsWrPtr	; 1 - PTR=
+bcc  UX_ArgsRdExt	; 2 - =EXT
+;
+; Read/Write PTR
+; --------------
+.UX_ArgsRdPtr		; data=PTR, R2=0
+mov  #2,r2
+.UX_ArgsRdPtr2
+clr  r0
+clr  r1
+.UX_ArgsWrPtr		; PTR=data, R2=1
+dec  r2			; R2=0 - PTR=data, R2=1 - data=PTR, R2=2 - data=EXT
+#ifdef BSD211
+ mov  r2,-(sp)		; whence
+ mov  r1,-(sp)		; lo
+ mov  r0,-(sp)		; hi
+ mov  r3,-(sp)		; fd
+ clr  -(sp)		; padding
+ trap 19		; lseek(fd, offset, whence)
+ add  #10,sp		; Drop parameters
+#else
+ bitb #FLG_UNIXNEW,SV_SYS; Are we running on Unix7 or later?
+ bne  UX_ArgsSeek	; Unix7, use 24-bit pointer
+ mov  r1,r0		; Move 'offset.lo' to BUF+2
+ mov  r2,r1		; Move 'whence' to BUF+4, only 16-bit pointer
+ .UX_ArgsSeek
+ ;			;              r3  r0  r1  r2         r3  r0  r1
+ mov  r2,TRAP_BUF+6	; Set up lseek(fd, hi, lo, 0) or seek(fd, lo, 0) - PTR=0+hi.lo
+ mov  r1,TRAP_BUF+4	;   or   lseek(fd, 0,  0,  1) or seek(fd, lo, 1) - PTR=PTR+0
+ mov  r0,TRAP_BUF+2	;   or   lseek(fd, 0,  0,  2) or seek(fd, lo, 2) - PTR=EXT+0
+ mov  #&8913,TRAP_BUF	; trap 19 - lseek()
+ mov  r3,r0		; R0=handle
+ trap 0
+ equw TRAP_BUF
+#endif
+rts  pc
+;
+; Read EXT/Alloc
+; --------------
+.UX_ArgsRdExt		; =EXT
+jsr  pc,UX_ArgsRdPtr	; Read PTR, R1=lo R0=hi
+mov  r1,-(sp)		; Save PTR
+mov  r0,-(sp)
+mov  #3,r2		; 3-1=2 -> Read PTR from end of file
+jsr  pc,UX_ArgsRdPtr2	; Set PTR to end of file, returning EXT
+mov  r1,-(sp)		; Save this PTR which is the EXT
+mov  r0,-(sp)
+mov  6(sp),r1		; Get old PTR back
+mov  4(sp),r0
+dec  r2			; 1-1=0 -> Read PTR from end of file
+jsr  pc,UX_ArgsWrPtr	; Restore PTR to where it was
+mov  (sp)+,r0		; Get saved EXT back, R1=lo R0=hi
+mov  (sp)+,r1
+cmp  r0,(sp)+		; CC+NE: PTRhi<EXThi, CC+EQ: PTRhi=EXThi, CS+NE: PTRhi>EXThi (impossible)
+bne  UX_ArgsWrExtNE	; Not at EOF, drop PTRlo and return CLC
+cmp  r1,(sp)+		; CC+NE: PTRlo<EXTlo, CC+EQ: PTRlo=EXTlo, CS+NE: PTRlo>EXTlo (impossible)
+bne  UX_ArgsWrExt	; Not at EOF, return CLC
+sec			; At EOF, return SEC
+rts  pc
+.UX_ArgsWrExtNE
+tst  (sp)+		; Drop PTRlo, also CLC
+.UX_ArgsWrExt
+rts  pc
+;
+; Read EOF
+; --------
+.UX_ArgsRdEof		; =EOF
+tst  r3
+beq  UX_ArgsRdEofKBD	; EOF#0 - test keyboard
+jsr  pc,UX_ArgsRdExt	; Read EXT and compare with PTR, SEC=at EOF
+bcs  UX_ArgsAtEof	; At EOF, return TRUE
+.UX_ArgsAtEof0
+clr  r1
+clr  r0
+rts  pc
+.UX_ArgsRdEofKBD
+jsr  pc,KBD_TestKeyDelay ; R0=0 at EOF, R0<>0, not EOF
+tst  r0
+bne  UX_ArgsAtEof0	; Return FALSE
+.UX_ArgsAtEof
+mov  #-1,r1		; Return TRUE
+mov  r1,r0
+rts  pc
+
+
+; OSGBPB - Read/write multiple bytes
+; ==================================
+; On entry, R0=action
+;           R1=>control block
+; On exit,  Control block updated
+;
+.IO_GBPB
+tst  r0
+beq  UX_GBPBbbc
+cmp  r0,#5
+bcc  UX_GBPBbbc
+tstb 4(r1)		; Check top bit of address
+bmi  UX_GBPBbbc		; Using I/O memory, pass to BBC vector
+mov  r3,-(sp)		; Save registers
+mov  r2,-(sp)
+mov  r1,r2		; r2=>control block
+movb (r1),r1
+bic  #&FF00,r1		; r1=channel
+mov  r2,-(sp)		; Stack address of control block
+mov  r1,-(sp)		; Stack channel
+mov  r0,-(sp)		; Save action
+add  #9,r2		; r2=>PTR field
+mov  r1,r3		; r3=channel
+bit  #1,r0
+beq  UX_NoPtr		; Even numbered call, use existing PTR
+jsr  pc,FetchWord	; Get PTR from control block to r0/r1, r2=>next word
+mov  #1,r2		; R2=1 for Write PTR
+jsr  pc,UX_ArgsWrPtr	; Set PTR
+br   UX_PtrReady
+.UX_NoPtr
+jsr  pc,UX_ArgsRdPtr	; Get PTR to r0/r1
+jsr  pc,StoreWord	;  and store in control block, r2=>next word
+;
+.UX_PtrReady
+mov  4(sp),r2		; r2=>control block
+inc  r2			; Point to address
+jsr  pc,FetchWord	; r1=address, r2=>count
+mov  r1,r3		; r3=address
+jsr  pc,FetchWord	; r1=count
+cmp  (sp)+,#3		; CC=read, CS=write
+mov  (sp)+,r0		; Get handle
+jsr  pc,UX_DataTrans	; Transfer data, r0=handle, r3=address, r1=count
+			; On return, r0=actual count done
+mov  r0,r3		; r3=count actually done
+mov  (sp),r2		; Get control block address
+inc  r2			; Point to address
+jsr  pc,FetchAddStore	; Update address, r2=>count
+jsr  pc,FetchWord	; Get count, r2=>ptr
+sub  r3,r1
+sbc  r0
+sub  #4,r2		; r2=>count
+jsr  pc,StoreWord	; Update count, r2=>ptr
+jsr  pc,FetchAddStore	; Update PTR
+mov  (sp)+,r1		; Restore registers
+mov  (sp)+,r2
+mov  (sp)+,r3
+clr  r0			; R0=0 for action completed
+.UX_GBPBbbc
+rts  pc
+
+; Transfer data, r0=handle, r3=address, r1=count, CC=read, CS=write
+; On return, r0=actual count done
+.UX_DataTrans
+#ifdef BSD211
+ mov  r1,-(sp)		; count
+ mov  r3,-(sp)		; start
+ mov  r0,-(sp)		; channel
+ mov  r0,-(sp)		; padding, don't change Carry
+ bcs  UX_TransWR	; CS=write
+ trap 3			; read()
+ br   UX_Trans4
+ .UX_TransWR
+ trap 4			; write()
+ .UX_Trans4
+ rol  r0		; Save Carry
+ add  #8,sp		; Drop parameters
+ ror  r0		; Get Carry back
+#else
+ mov  #&8903,r2		; r2=trap 3 - read()
+ bcc  UX_DataTrans2
+ inc  r2		; r2=trap 4 - write()
+ .UX_DataTrans2
+ mov  r2,TRAP_BUF+0	; trap 3/4
+ mov  r3,TRAP_BUF+2	; Store address
+ mov  r1,TRAP_BUF+4	; Store count
+ trap 0			; indir()
+ equw TRAP_BUF		; read/write(buffer,count)
+#endif
+rts  pc
+
+
+; OSFILE - Load/save/info on whole files
+; ======================================
+; On entry, R0=action
+;           R1=>control block
+; On exit,  Control block updated
+;
+.IO_FILE
+incb r0
+cmp  r0,#2
+bcs  UX_FILE		; 0/1 -> Load/Save
+decb r0
+rts  pc
+
+; OSFILE &FF/&00 - Load/Save file
+; -------------------------------
+.UX_FILE
+mov  r5,-(sp)		; All registers used
+mov  r4,-(sp)
+mov  r3,-(sp)
+mov  r2,-(sp)
+mov  r1,-(sp)
+mov  r0,r4		; r4=0/1 -> Load/Save
+mov  r1,r2		; r2=>control block
+
+; Get filename and open file
+; --------------------------
+jsr  pc,FetchWord	; r1=>fname, r0=corrupted, r2=r2+4
+tst  r4
+bne  UX_File1		; Jump for Save File
+dec  r4			; Prepare error=-1
+tstb 2(r2)		; Test for 'load to specified address'
+bne  errBadAddress	; No address supplied, Unix doesn't have file address, error
+inc  r4			; Restore R4=LOAD
+sub  #8,r2		; Prepare to point r2=>control block load address
+.UX_File1
+mov  r4,r0
+jsr  pc,UX_OPEN2	; Open file with R0 0=LOAD, 1=SAVE
+beq  UX_FileError	; r4=0/1, error occured in load/save (not found, can't save, insuf. access)
+add  #6,r2		; r2=>control block start address or load address
+mov  r0,r5		; r5=channel
+
+; Get start address and length, do read/write
+; -------------------------------------------
+jsr  pc,FetchWord	; Get load/start address from control block, r2=>next word
+mov  r1,r3		; r3=start address
+mov  sp,r1		; r1=end address, bottom of stack
+tst  r4
+beq  UX_File2		; Load up to bottom of stack
+jsr  pc,FetchWord	; Get end address from control block
+.UX_File2
+sub  r3,r1		; r1=length to load/save
+mov  r5,r0		; r0=channel
+cmp  #0,r4		; CC=load, CS=save
+jsr  pc,UX_DataTrans
+bcs  UX_FileErrorClose	; r4=2/3, error occured in load/save
+
+; Update control block
+; --------------------
+mov  r0,r1
+clr  r0			; &r0:r1=length of file
+mov  (sp),r2		; Get address of control block back
+add  #10,r2		; Point to 'length' in control block
+jsr  pc,StoreWord
+mov  r5,r0		; r0=handle
+jsr  pc,UX_CloseR0	; close(handle)
+mov  (sp)+,r1
+mov  (sp)+,r2
+mov  (sp)+,r3
+mov  (sp)+,r4
+mov  (sp)+,r5
+mov  #1,r0		; Return 'File found'
+rts  pc
+
+; Error occured during OSFILE
+; ---------------------------
+; *BUG* Should check returned error
+.UX_FileErrorClose
+mov  r5,r0		; r0=handle
+jsr  pc,UX_CloseR0	; close(handle)
+.UX_FileError
+movb r0,SV_STEP		; *TEST* Somewhere to store UXERRNUM
+mov  #msgFileNotFound,r0
+dec  r4
+bmi  UX_FileErrRet	; r4=0, Load -> File not found (or insufficient access)
+mov  #msgCantOpen,r0
+dec  r4
+bmi  UX_FileErrRet	; r4=1, Save -> Can't save file (or insufficient access)
+mov  #msgReadError,r0
+dec  r4
+bmi  UX_FileErrRet	; r4=2, Load -> Read error, usually invalid memory
+adr  msgWriteError,r0	; r4=3, Save -> Write error, usually Disk full
+.UX_FileErrRet
+JMP ErrorHandler	; Generate error with R0=>block
+;
+.errBadAddress
+jsr  pc,Error
+equb 252,"Bad address",0
+.msgFileNotFound
+equb 214,"File not found",0
+.msgCantOpen
+equb 192,"Can't save file",0
+.msgReadError
+equb 202,"Read error",0
+.msgWriteError
+equb 198,"Disk full",0
+;equb 202,"Write error",0
+;equb 202,"Data lost",0
+align
+
+
+; Convert cr-string to nul-string for Unix calls
+; ==============================================
+; On entry, r1=>string
+; On exit,  r1=>string
+
+; Copy only first space-terminated string to null-string
+; ------------------------------------------------------
+.UX_String
+.UX_StringSpc
+jsr  pc,UX_StringCopyR1
+mov  r1,-(sp)		; Save pointer to string
+.UX_StringLp
+cmpb (r1)+,#33		; Loop until CtrlChar or Space
+bcc  UX_StringLp
+clrb -(r1)		; Store terminating zero
+mov  (sp)+,r1
+rts  pc
+
+; Copy cr-string to null-string
+; -----------------------------
+; On entry, r0=>source string
+; On exit,  r1=>converted string
+;
+.UX_StringCopy
+mov  r0,r1
+.UX_StringCopyR1
+mov  r0,-(sp)		; Save R0
+;adr  SV_INPUT,r0
+mov  #SV_INPUT,r0
+.UX_StrCpyPre
+cmpb (r1)+,#32
+beq  UX_StrCpyPre	; Skip any leading spaces
+dec  r1			; Balance increments
+.UX_StrCpyLp
+cmpb (r1),#32		; Terminate at first CtrlChar
+bcs  UX_StrCpyDone
+movb (r1)+,(r0)+
+#ifdef KBDUPPER
+ cmpb -1(r0),#ASC"@"
+ bcs  UX_StrCpyLp	; Not a letter
+ bisb #32,-1(r0)	; Force to lower case
+#endif
+br   UX_StrCpyLp
+.UX_StrCpyDone
+clrb (r0)
+;adr  SV_INPUT,r1
+mov  #SV_INPUT,r1
+mov  (sp)+,r0		; Restore R0
+rts  pc
+
+
+; CONSOLE INPUT
+; ~~~~~~~~~~~~~
+
+; Check for Escape state
+; ----------------------
+;.IO_EscapeFast
+;movb #1,SV_TICKER		; Bypass ticker
+.IO_Escape
+tstb SV_ESCFLG			; Check local Escape flag
+bmi  errEscape			; Background Escape pending
+bitb #FLG_ESCAPE,SV_SYS		; Is Escape disabled?
+bne  IO_NoEscape		; Don't test for Escape
+#ifndef BSD211
+				; BSD2.11 uses polling
+ #ifndef ESCPOLL
+  bitb #FLG_UNIXNEW,SV_SYS	; Test for Unix v7+
+  bne  IO_NoEscape		; Escape being tested for in background
+ #endif
+#endif
+decb SV_TICKER			; Only test Escape every so often
+bne  IO_NoEscape
+#if KBD_TICK=0
+ clrb SV_TICKER		 	; Reset Unix v6/v5 Escape ticker
+#else
+ movb #KBD_TICK,SV_TICKER	; Reset Unix v6/v5 Escape ticker
+#endif
+.IO_EscapeFast			; Bypass ticker
+.IO_Escape2
+jsr  pc,KBD_TestKey		; r0=0 if nothing pending
+beq  IO_NoEscape
+jsr  pc,KBD_WaitKey		; Get next character from STDIN
+cmpb r0,#27
+bne  IO_EscapePushback		; Not <esc>, push it back
+jsr  pc,KBD_TestKeyDelay	; r0=0 if nothing pending
+beq  errEscape			; <esc><nochar> - Escape key
+.IO_EscapePushbackLp
+jsr  pc,KBD_WaitKey		; Swallow keypress
+.IO_EscapePushback
+jsr  pc,KBD_TestKey		; r0=0 if nothing pending
+bne  IO_EscapePushbackLp	; Flush keyboard buffer
+;movb r0,SV_KBDBUF
+;incb SV_KBDQ
+.IO_NoEscape
+rts  pc
+.errEscape
+clrb SV_KBDQ			; Clear keyboard queue
+jsr  pc,Error			; Generate Escape error
+equb 17,"Escape",0
+align
+
+#ifndef BSD211
+ .IO_TTYfetch4
+ add  #4,r1		; PTR=R1+4
+ .IO_TTYfetchR1
+ mov  r1,SV_KBDFETCH+2	; Set PTR
+ .IO_TTYfetch
+ mov  r0,-(sp)		; Save handle
+ trap 0
+ equw SV_KBDFETCH	; seek()
+ mov  (sp)+,r0		; Get handle
+ .IO_TTYfetch1
+ mov  r0,-(sp)		; Save handle
+ trap 3			; read()
+ equw SV_KBDTEST	; =>buffer
+ equw 2			; read two bytes
+ mov  (sp)+,r0		; Get handle back
+ mov  SV_KBDTEST,r1
+ rts  pc
+
+ .IO_TTYmem
+ equs "/dev/mem",0
+ align
+#endif
+
+.KBD_TestKeyDelay
+.KBD_WaitKeyDelay
+; On exit, EQ=no key waiting,   R0=0
+;          NE=keypress present, R0=non-zero
+#ifdef BSD211
+.BSDKBDWAIT EQU 8		; 8 * 1/16th sec to wait
+ clr  -(sp)			; Timer workspace
+ clr  -(sp)			; Don't fetch timezone
+ mov  #SV_KBDFETCH+0,-(sp)	; tv_sec[4], tv_usec[4]
+ mov  #BSDKBDWAIT,-(sp)		; Wait up to 16*1/16 sec
+ trap 116			; SYS gettimeofday, SV_KBDFETCH+4=1/16th sec counter
+ mov  SV_KBDFETCH+4,6(sp)	; 6(sp)=start time
+ .KBD_WaitKeyDelayLp
+ jsr  pc,KBD_TestKey
+ bne  KBD_WaitKeyDelayPressed	; Key pressed
+ .KBD_WaitKeyDelayLp2
+ trap 116			; SYS gettimeofday
+ cmp  SV_KBDFETCH+4,6(sp)
+ beq  KBD_WaitKeyDelayLp2	; Wait until 1/16s counter changes
+ dec  (sp)
+ bne  KBD_WaitKeyDelayLp	; Loop for number of 1/16ths seconds
+ clr  r0			; Nothing pressed
+ .KBD_WaitKeyDelayPressed
+ add  #8,sp			; Drop parameters
+ tst  r0			; Set flags
+ rts  pc
+#else
+ mov  r1,-(sp)			; time() modifies R1
+ mov  #KBD_DELAY,-(sp)		; Fiddled by experimentation
+ .KBD_WaitKeyDelayLp
+ trap 13			; Pause a mo and allow delays to pass, corrupts R0,R1
+ dec  (sp)
+ bne  KBD_WaitKeyDelayLp
+ tst  (sp)+
+ mov  (sp)+,r1			; Restore R1 for caller
+#endif
+;				; Continue into TestKey
+;
+.KBD_TestKey
+; On exit, EQ=no key waiting,   R0=0
+;          NE=keypress present, R0=non-zero
+movb SV_KBDQ,r0
+bne  KBD_TestKeyOk
+mov  r1,-(sp)			; seek() and ioctl() modifies R1
+#ifdef BSD211
+ mov  #SV_KBDTEST-2,-(sp)	; addr=SV_KBDTEST-2, low word in SV_KBDTEST
+ mov  #ASC"f"*256+127,-(sp)	; FIONREAD
+ mov  #&4004,-(sp)		; b14=get, 4 bytes to read
+ clr  -(sp)			; fd=STDIN
+ clr  -(sp)			; Padding
+ trap 54
+ add  #10,sp			; Drop from stack
+#else
+ clrb SV_KBDTEST		; Prepare 'none'
+ bitb #FLG_UNIXV9,SV_SYS	; Is FIONREAD available?
+ beq  KBD_TestFetch		; Read kbdQ manually
+ trap 54 			; ioctrl()
+ equw 0				; stdin
+ equb 127,"f"			; FIONREAD
+ equw SV_KBDTEST-2		; Read number of keys pending
+ br   KBD_TestKeyExit
+ ;
+ .KBD_TestFetch
+ mov  SV_KBDFETCH+2,r0		; If offset=0, no kbdQ found
+ bis  SV_KBDFETCH+4,r0
+ beq  KBD_TestKeyExit
+ trap 5				; open()
+ equw IO_TTYmem			; =>"/dev/mem"
+ equw 0				; 0=read
+ bcs  KBD_TestKeyExit		; Failed to open, return prepared 0
+ jsr  pc,IO_TTYfetch		; Seek to kbdQ and fetch
+ trap 6				; close()
+ .KBD_TestKeyExit
+#endif
+mov  (sp)+,r1			; Restore R1 for caller
+movb SV_KBDTEST,r0		; Get the word read, setting EQ
+.KBD_TestKeyOk
+rts  pc
+
+.KBD_WaitKey
+; On exit, CC=keypress returned, R0=keypress
+;          CS=Escape,            R0=undefined
+;movb SV_KBDQ,r0
+;beq  KBD_WaitKeyRead		; Nothing pending
+;.KBD_WaitKeyPend
+;movb SV_KBDBUF,r0		; Get pending keypress
+;br   KBD_WaitKeyOk
+;.KBD_WaitKeyRead
+;jsr  pc,UNIX_BGET0		; Read from STDIN
+;tstb SV_KBDQ
+;bne  KBD_WaitKeyPend
+;;bcc  KBD_WaitKeyOk		; Not <SIGINT>
+;;mov  #27,r0			; Return ESCAPE
+;.KBD_WaitKeyOk
+;clrb SV_KBDQ			; Clear queue, clear C
+;rts  pc
+
+movb SV_KBDQ,r0
+bne  KBD_WaitKeyPend		; Get pending keypress
+jsr  pc,UNIX_BGET0		; Read from STDIN
+tstb SV_KBDQ
+beq  KBD_WaitKeyOk		; Not <SIGINT>, return it
+.KBD_WaitKeyPend
+movb SV_KBDBUF,r0		; Get pending keypress
+.KBD_WaitKeyOk
+clrb SV_KBDQ			; Clear queue, clear C
+rts  pc
+
+
+; Link to embedded code
+; ---------------------
+.SV_EMBED
+EQUW 0			; No embedded program
+
+; End of saved program code
+; -------------------------
+.CodeEnd		; End of 'text/code' section
+.DataEnd		; End of 'data' section
+BSS			; End of saved portion
+
+; TTY settings
+; ------------
+.SV_TTY		; TTY settings
+		EQUB 0		; ispeed
+		EQUB 0		; ospeed
+		EQUB 0		; erase			#
+		EQUB 0		; kill			@
+		EQUB 0		; flags
+				;   1 Automatic flow control
+				;   2 v6=Expand TABs  v7=Half-Raw input
+				;   4 Map upper to lower on input
+				;   8 Echo
+				;  16 Map input CR->LF, output LF or CR -> CR-LF
+				;  32 Raw, 8-bit characters
+				;  64 Odd parity allowed on input
+				; 128 Even parity allowed on input
+		EQUB 0		; delays
+#ifdef BSD211
+		EQUW 0		; BSD has 32-bit settings
+#endif
+.SV_OSTTY	EQUW 0		; Host's flags+delay settings
+
+.SV_IOCTL	; IOCTL characters
+		EQUB 0		; interupt		DEL
+		EQUB 0		; quit			Ctrl-\
+		EQUB 0		; start output		Ctrl-Q
+		EQUB 0		; stop output		Ctrl-S
+		EQUB 0		; end-of-file		Ctrl-D
+		EQUB 0		; input delimiter	-1
+.SV_OSIOCTL	EQUW 0		; Host's interupt+quit characters
+
+; Use by background calls, so can't use foreground workspace
+.SV_KBDFETCH	EQUW 0		; trap seek()    or lseek()
+		EQUW 0		;      offset.lo or offset.hi
+		EQUW 0		;      whence=0  or offset.lo
+		EQUW 0		;      unused    or whence=0
+.SV_KBDTEST	EQUW 0		; word read from kernel workspace
+.SV_RDWRFLAGS	EQUW 0		; BGET EOF flags, etc.
+
+; TRAP buffer
+; -----------
+;.SV_ERRNO	EQUW 0		; Unix error number
+.TRAP_BUF	EQUM 8		; TRAP + three parameters
+.CHAR_BUF	EQUB 0		; Seperate buffer so Debug functions work
+.SV_TICKER	EQUB 0		; Escape test ticker
+ALIGN
+.SV_KBDQ	EQUB 0		; Keyboard queue
+.SV_KBDBUF	EQUB 0		; Keyboard buffer
+ALIGN
+
+; Memory size
+; -----------
+.SV_MEMBOT	EQUW 0		; Bottom of memory
+.SV_MEMTOP	EQUW 0		; Top of memory
+;.SV_ENVPTR	EQUW &0000	; External environment pointer, only needed if system() needs it.
+				; Usually at &FFxx, separated from BASIC memory below &E000
+				; Unix gives us a block of memory at &FC00-&FFFF, initial stack
+				; descends from &FFFF with parameters passed. Could this memory
+				; be used for anything? It is a handy extra 1K of memory space.
+				; On BSD we have to switch it out of memory for stack to work.
+

@@ -1,0 +1,112 @@
+; > SysVars
+; System Variables
+;
+; 10-Feb-2013: Unix vectors moved to UnixIO
+; 15-Aug 2018: MOS_BUF moved to fix alignment
+
+
+.SV_PAD		equm 256-((SV_PAD+6)AND255)	; 6=SV_STRING-SV_PAD, forward reference
+
+
+; Misc. put here to align PAGE-SV_VARS
+; ------------------------------------
+.SV_RAND	equd &00000000	; RND seed						Startup
+.SV_RAND4	equb &00	; Fifth byte of RND seed				Startup
+.SV_STEP	equb &00	; AUTO step, SV_STRING-1 used for TIME$= call		AUTO
+
+; String buffers
+; --------------
+.SV_STRING	equm 256	; String accumulator, immediate entry buffer, fixed at PAGE-&300
+.SV_INPUT	equm 256	; Command buffer, tokenised immediate entry written here
+
+.MOS_BUF	equ SV_INPUT+256-18 ; Put at top of command buffer
+.FILE_NAME	equ MOS_BUF+0
+.FILE_LOAD	equ MOS_BUF+2
+.FILE_EXEC	equ MOS_BUF+6
+.FILE_LENGTH	equ MOS_BUF+10
+.FILE_START	equ MOS_BUF+10
+.FILE_ATTR	equ MOS_BUF+14
+.FILE_END	equ MOS_BUF+14
+
+; Static variables and heap pointers
+; ----------------------------------
+.SV_VARS	equd &00000000	; @%
+		equm 26*4	; A%-Z%
+.SV_INT_O	equ SV_VARS+&3C	; O%
+.SV_INT_P	equ SV_VARS+&40	; P%
+.SV_VARPTR	equm 26*2	; A-Z pointers
+.SV_PROCPTR	equw &0000	; [ -> PROC pointer
+.SV_FNPTR	equw &0000	; \ -> FN pointer
+.SV_STRPTR	equw &0000	; ] -> Unused strings pointer
+.SV_SYSPTR	equw &0000	; ^ -> unused pointer - could point to something
+		equw &0000	; _ pointer
+		equw &0000	; ` pointer
+		equm 26*2	; a-z pointers
+.SV_ENDPTR
+
+; Memory structure									Initialised by
+; ----------------
+.SV_PAGE	equw &0000	; PAGE - start of BASIC program				Startup
+.SV_TOP 	equw &0000	; End of BASIC program					VarHeapInit
+.SV_LOMEM	equw &0000	; Start of BASIC variable area				VarHeapInit
+.SV_VAREND	equw &0000	; End of BASIC variable area				VarHeapInit
+.SV_STACK	equw &0000	; Bottom of BASIC stack - restored SP on local error	Immediate
+.SV_HIMEM	equw &0000	; Top of BASIC stack/memory				Startup
+
+; Program lines
+; -------------
+.SV_LINE	equw &0000	; Current line number					Immediate
+.SV_TRACE	equw &0000	; TRACE line number					ErrorHandler
+.SV_AUTO	equw &0000	; AUTO line number					Startup
+.SV_ERL		equw &0000	; Line number error occured in				ErrorHandler
+
+; Program pointers
+; ----------------
+.SV_FAULT	equw &0000	; Last error						Startup
+.SV_ONERR	equw &0000	; Points to after ON ERROR				Immediate
+.SV_DATA	equw &0000	; DATA pointer						NEW/RUN
+
+; Misc.
+; -----
+.SV_WIDTH	equb &00	; WIDTH							Startup
+.SV_COUNT	equb &00	; COUNT							Startup
+.SV_OPTIONS	equb &00	; LISTO and OPT options					Startup
+.SV_ERR 	equb &00	; ERR							Startup
+.SV_SYS		equb &00	; System flags						IO_Init
+		; b7-b4 generic flags
+		;	b7=quit after running program
+		;	b6=embedded program
+		;	b5=BBC EMT calls available
+		;	b4=Escape disabled
+		; b3-b0 platform specific flags
+		;	Unix					RT11
+		;	b3 \					b3=
+		;	b2  } (Unix version)-5			b2=
+		;	b1 /					b1=
+		;	b0=fd0 stdin not a tty			b0=
+		; b3-b1=00x - no Unix v7 calls:
+		;		16-bit seek(), no ioctl() use stty(), one-second timer
+		;     <>00x - Unix v7 calls:
+		;		32-bit seek(), ioctl() available, millisecond timer
+		;     <>11x - Bell Unix API (inline parameters)
+		;	11x - BSD Unix API (stacked parameters)
+; 00x - inline API,  16-bit seek, stty,   raw,    one-second time,   polled escape
+; 01x - inline API,  24-bit seek, ioctrl, cooked, millisecond timer, background escape
+; 10x - inline API,  24-bit seek, ioctrl, cooked, millisecond timer, background escape
+; 11x - stacked API, 24-bit seek, ioctrl, cooked, millisecond timer, background escape
+;
+.FLG_QUIT	equ &80
+.FLG_EMBED	equ &40
+.FLG_BBCEMT	equ &20
+.FLG_ESCAPE	equ &10
+.SV_ESCFLG	equb &00	; Escape flag						IO_Init
+ALIGN
+
+; end of 'bss' section
+.BasicEnd			; End of 'uninitialised data' section
+._END%
+
+.DefaultPAGE
+#if DefaultPAGE-SV_VARS<>&100	#error PAGE must be SV_VARS+&100
+#if DefaultPAGE-SV_STRING<>&300	#error PAGE must be SV_STRING+&300
+#ifdef SV_PAD #if (DefaultPAGE AND &FF)<>0 #error PAGE not page aligned

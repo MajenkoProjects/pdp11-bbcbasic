@@ -1,0 +1,154 @@
+; > TubeIO
+; Minimal interface to Tube system
+
+; 26-Jan-2014 v0.19b IO_CommandLine combined with IO_Init
+; 11-Aug-2015 v0.20a IO_Init doesn't look for Unix stack frame in BBC environment
+; 31-Aug-2015 v0.21a IO_Init tidied up, assumes caller sets default handlers
+; 16-Jul-2017 v0.26c Bugfix for bug in Tube Client v0.25
+;TUBEBUG: EQU 1	; Bug in Tube Client
+
+; Initialise Host I/O system
+; ==========================
+; On entry, r6=>top of memory-2, bottom of stack, startup parameters
+;               stacked parameters end with -1 or 0 (documented as 0, actually -1)
+;           r5=&0BBC for BBC environment or <>&0BBC otherwise
+;           r1=>command line if r0=1
+;           r0=1 entered as a language
+;           r0=0 entered as raw code or Unix code that has had header stripped
+;           CC=entered from RESET, CS=entered from OSCLI
+; On exit,  r0=bottom of memory
+;           r1=top of memory
+;
+.IO_Init
+bcs IO_Init1		; Not Cy=0 on entry, not RESET entry
+asr r0
+bne IO_Init2		; Not R0=0 or R0=1 on entry, not language entry
+mov #11,r0		; If RESET, move up two lines to overwrite ROM title
+emt 4
+emt 4
+
+; Copy any command line to string buffer
+; --------------------------------------
+.IO_Init1
+.IO_Init2
+;movb #13,SV_STRING	; Store null string as command line
+adr SV_STRING,r2	; Point to string buffer
+.IO_CommandLine
+movb (r1)+,r0		; Copy command line to string buffer
+movb r0,(r2)+
+cmpb r0,#13
+bne  IO_CommandLine	; Loop until <cr> copied
+
+; Set BBC handlers
+; ----------------
+mov #1,r0
+emt 13			; Create new program environment
+mov #-2,r0		; r0=-2 = Escape handler
+clr r1			; r1=Keep default handler routine
+adr SV_ESCFLG,r2	; r2=New handler address
+emt 14			; Set Escape flag
+dec r0			; r0=-3 = Error handler
+adr ErrorHandler,r1	; r1=New handler routine
+clr r2			; r2=Keep default buffer address
+emt 14			; Set Error handler
+mov #&20,SV_SYS		; Clear SYS and ESCFLG, set BBC EMTs available
+#ifdef TUBEBUG
+ mov #-10,r0		; Bugfix for broken Tube Client
+ adr Startup,r1		; Set PROG to me
+ clr r2
+ emt 14
+#endif
+; Return memory limits
+; --------------------
+mov #&84,r0
+jsr pc,IO_BYTE		; r1=top of memory
+mov r1,-(sp)
+dec r0			; r0=&83
+jsr pc,IO_BYTE		; r1=bottom of memory
+adr DefaultPAGE,r0	; r0=end of code
+cmp r1,r0
+bcs IO_Init4		; End of code is higher than bottom of memory, use it instead
+mov r1,r0		; Bottom of memory is higher than end of code, use it
+.IO_Init4
+mov (sp)+,r1
+.IO_NoError
+.IO_NoEscape
+rts pc
+
+
+; Check for Escape state
+; ======================
+.IO_EscapeFast
+.IO_Escape
+tstb SV_ESCFLG		; Check local Escape flag
+bpl  IO_NoEscape	; Return with no Escape state
+.errEscape
+jsr  pc,Error		; Generate Escape error
+equb 17,"Escape",0
+align
+
+
+; Direct calls to BBC MOS I/O calls
+; =================================
+.IO_QUIT0	clr r0
+.IO_QUIT	mov r0,-(sp)	; Save return value
+		mov #2,r0
+		emt 13		; Set default handlers
+		mov (sp)+,r0	; Get return value back
+		emt 0		; Won't actually get back!
+		BR  IO_Return	; But just in case
+.IO_CLI		emt 1		; r0=>command string
+		BR  IO_Return
+.IO_BYTE	emt 2		; Osbyte r0,r1,r2
+		BR  IO_Return
+.IO_WORD	emt 3		; Osword r0,r1=>block
+		BR  IO_Return
+.IO_WRCR	mov #13,r0
+		br  IO_WRCH
+.IO_ASCI	cmp r0,#13
+		beq IO_NEWL
+.IO_WRCH	emt 4		; Oswrch r0=char
+		BR  IO_Return
+.IO_NEWL	emt 5		; Print NEWLINE
+		BR  IO_Return
+.IO_RDCH	emt 6		; Osrdch r0=char
+		BR  IO_Return
+.IO_FILE	emt 7		; Osfile r0=action, r1=>block
+		BR  IO_Return
+.IO_ARGS	emt 8		; Osargs r0=action, r1=>block, r2=handle
+		BR  IO_Return
+.IO_BGET	emt 9		; Osbget r1=handle
+		BR  IO_Return
+.IO_BPUT	emt 10		; Osbput r0=byte, r1=handle
+		BR  IO_Return
+.IO_GBPB	emt 11		; Osgbpb r0=action, r1=>block
+		BR  IO_Return
+.IO_FIND	emt 12		; Osfind r0=action, r1=>filename or handle
+;		BR  IO_Return
+;.IO_SYST	emt 13
+;		BR  IO_Return
+;.IO_CTRL	emt 14
+;		BR  IO_Return
+;.IO_ERROR	emt 15		; Generate inline error
+.IO_Return	BVC IO_NoError
+;		BVS IO_Error
+;.IO_ReadTime	rts pc		; Dummy read system time to R1:R0
+.IO_Error	jmp ErrorHandler; R0=>error block byte,string,zero byte
+
+EQUW 0				; No extra embedded data
+.CodeEnd			; End of 'text/code' section
+
+; end of 'text' section
+; +++++++++++++++++++++++
+
+; +++++++++++++++++++++++
+; start of 'data' section
+
+.DataEnd			; End of 'data' section
+; end of 'data' section
+; +++++++++++++++++++++++
+
+; +++++++++++++++++++++++
+; start of 'bss' section
+BSS				; End of saved portion
+

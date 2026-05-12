@@ -1,0 +1,306 @@
+; > Debug
+; Debug routines
+
+; All registers preserved (except flags)
+; Debug_Byte          Output byte in R0 in hex
+; Debug_Hex           Output R0 in hex
+; Debug_Oct           Output R0 in octal
+; Debug_Char          Output R0 as character or dot
+; Debug_DumpRegsOct   Dump all registers in octal
+; Debug_DumpRegsHex   Dump all registers in hex
+; Debug_DumpRegsFlags Dump flags and registers in hex (preserves flags)
+; Debug_DumpLine      Dump line at R5
+; Debug_DumpMem       Dump three lines of memory at R5 in hex
+; Debug_DumpMemOne    Dump one line of memory at R5 in hex
+; Debug_DumpStack     Dump one line of memory at SP in hex
+
+; Requires:
+; IO_WRCH - output character in R0
+; IO_NEWL - output newline
+
+
+; Print R0 as hex byte
+; --------------------
+.Debug_Byte
+mov r0,-(sp)
+jsr pc,Debug_hex1
+br  Debug_done
+
+; Print R0 as hex word
+; --------------------
+.Debug_Hex
+mov r0,-(sp)
+jsr pc,Debug_hex2
+br  Debug_done
+
+; Print R0 as octal word
+; ----------------------
+.Debug_Oct
+mov r0,-(sp)
+jsr pc,Debug_oct
+br  Debug_done
+
+; Print R0 as character or dot
+; ----------------------------
+.Debug_Char
+mov r0,-(sp)
+bic #&FF80,r0
+cmp r0,#127
+beq Debug_CharDot
+cmp r0,#32
+bcc Debug_CharOk
+.Debug_CharDot
+mov #ASC".",r0
+.Debug_CharOk
+jsr pc,IO_WRCH
+.Debug_done
+mov (sp)+,r0
+rts pc
+
+; Dump registers
+; --------------
+.Debug_DumpRegsOct
+mov r0,-(sp)
+jsr pc,Debug_octSpc
+mov r1,r0
+jsr pc,Debug_octSpc
+mov r2,r0
+jsr pc,Debug_octSpc
+mov r3,r0
+jsr pc,Debug_octSpc
+mov r4,r0
+jsr pc,Debug_octSpc
+mov r5,r0
+jsr pc,Debug_octSpc
+mov r6,r0
+add #4,r0
+jsr pc,Debug_oct
+.Debug_newl
+jsr pc,IO_NEWL
+mov (sp)+,r0
+rts pc
+
+; Dump registers and flags
+; ------------------------
+.Debug_DumpRegsFlags
+mfps -(sp)
+mov  r0,-(sp)
+;
+mov #ASC"M",r0
+bit #8,2(sp)
+jsr pc,Debug_flag
+;
+mov #ASC"Z",r0
+bit #4,2(sp)
+jsr pc,Debug_flag
+;
+mov #ASC"V",r0
+bit #2,2(sp)
+jsr pc,Debug_flag
+;
+mov #ASC"C",r0
+bit #1,2(sp)
+jsr pc,Debug_flag
+;
+jsr pc,Debug_spc
+mov (sp)+,r0
+jsr pc,Debug_DumpRegsHex
+mtps (sp)+
+rts pc
+
+.Debug_flag
+bne Debug_flag2
+mov #ASC"-",r0
+.Debug_flag2
+jmp IO_WRCH
+
+; Dump registers
+; --------------
+.Debug_DumpRegsHex
+mov r0,-(sp)
+jsr pc,Debug_hexSpc
+mov r1,r0
+jsr pc,Debug_hexSpc
+mov r2,r0
+jsr pc,Debug_hexSpc
+mov r3,r0
+jsr pc,Debug_hexSpc
+mov r4,r0
+jsr pc,Debug_hexSpc
+mov r5,r0
+jsr pc,Debug_hexSpc
+mov r6,r0
+add #4,r0
+jsr pc,Debug_hex2
+br  Debug_newl
+
+; Dump line at R5
+; ---------------
+.Debug_DumpLine
+mov r0,-(sp)	; push r0
+mov r5,-(sp)	; push r5
+;
+.Debug_LineLp1
+movb (r5)+,r0
+jsr pc,Debug_hex1
+jsr pc,Debug_spc
+cmpb -3(r5),#13
+bne Debug_LineLp1
+jsr pc,IO_NEWL
+;
+mov (sp),r5	; get r5 back
+.Debug_LineLp2
+jsr pc,Debug_spc
+movb (r5)+,r0
+jsr pc,Debug_Char
+jsr pc,Debug_spc
+cmpb -3(r5),#13
+bne Debug_LineLp2
+jsr pc,IO_NEWL
+;
+mov (sp)+,r5	; restore R5
+mov (sp)+,r0	; restore R0
+rts pc
+
+; Dump stack
+; ----------
+.Debug_DumpStack
+mov r5,-(sp)
+mov sp,r5
+add #4,r5
+jsr pc,Debug_DumpMemOne
+mov (sp)+,r5
+rts pc
+
+; Dump one line of memory at R5
+; -----------------------------
+.Debug_DumpMemOne
+mov r0,-(sp)	; push r0
+mov r1,-(sp)	; push r1
+mov r2,-(sp)	; push r2
+mov r5,-(sp)	; push r5
+mov r5,-(sp)	; push r5
+mov #1,r2	; Dump one line
+br  Debug_MemLp0
+
+; Dump three lines of memory at R5
+; --------------------------------
+.Debug_DumpMem
+mov r0,-(sp)	; push r0
+mov r1,-(sp)	; push r1
+mov r2,-(sp)	; push r2
+mov r5,-(sp)	; push r5
+mov r5,-(sp)	; push r5
+;
+mov #3,r2	; Dump three lines
+.Debug_MemLp0
+mov r5,r0
+jsr pc,Debug_hexSpc
+mov #16,r1	; Dump 16 bytes
+.Debug_MemLp1
+movb (r5)+,r0
+jsr pc,Debug_hex1
+jsr pc,Debug_spc
+dec r1
+bne Debug_MemLp1
+jsr pc,IO_NEWL
+;
+jsr pc,Debug_spc
+jsr pc,IO_WRCH
+jsr pc,IO_WRCH
+jsr pc,IO_WRCH
+jsr pc,IO_WRCH
+mov (sp),r5	; get r5 back
+mov #16,r1
+.Debug_MemLp2
+jsr pc,Debug_spc
+movb (r5)+,r0
+jsr pc,Debug_Char
+jsr pc,Debug_spc
+dec r1
+bne Debug_MemLp2
+jsr pc,IO_NEWL
+;
+mov r5,(sp)
+dec r2
+bne Debug_MemLp0
+
+mov (sp)+,r5	; pop R5
+mov (sp)+,r5	; pop R5
+mov (sp)+,r2	; pop R2
+mov (sp)+,r1	; pop R1
+mov (sp)+,r0	; pop R0
+rts pc
+
+; Print R0 in oct, followed by a space
+; ------------------------------------
+.Debug_octSpc
+jsr pc,Debug_oct
+br  Debug_spc
+
+; Print R0 in hex, followed by a space
+; ------------------------------------
+.Debug_hexSpc
+jsr pc,Debug_hex2
+
+; Print a space
+; -------------
+.Debug_spc
+mov #32,r0
+jmp IO_WRCH
+
+.Debug_hex2
+mov r0,-(sp)
+swab r0
+jsr pc,Debug_hex1
+mov (sp)+,r0
+.Debug_hex1
+mov r0,-(sp)
+ror r0
+ror r0
+ror r0
+ror r0
+jsr pc,Debug_nybble
+mov (sp)+,r0
+.Debug_nybble
+bic #&FFF0,r0
+cmp #9,r0
+bcc Debug_digit
+add #7,r0
+br Debug_digit
+
+.Debug_octdigit6
+ror r0
+ror r0
+.Debug_octdigit4
+ror r0
+.Debug_octdigit3
+ror r0
+ror r0
+.Debug_octdigit1
+ror r0
+.Debug_octdigit
+bic #&FFF8,r0
+.Debug_digit
+add #48,r0
+jmp IO_WRCH
+
+.Debug_oct
+mov r0,-(sp)
+bic #&8000,r0
+rol r0
+rol r0
+jsr pc,Debug_octdigit  ; %Dxxxxxxxxxxxxxxx
+mov (sp),r0
+swab r0
+jsr pc,Debug_octdigit4 ; %xDDDxxxxxxxxxxxx
+mov (sp),r0
+swab r0
+jsr pc,Debug_octdigit1 ; %xxxxDDDxxxxxxxxx
+mov (sp),r0
+jsr pc,Debug_octdigit6 ; %xxxxxxxDDDxxxxxx
+mov (sp),r0
+jsr pc,Debug_octdigit3 ; %xxxxxxxxxxDDDxxx
+mov (sp)+,r0
+br  Debug_octdigit     ; %xxxxxxxxxxxxxDDD
+

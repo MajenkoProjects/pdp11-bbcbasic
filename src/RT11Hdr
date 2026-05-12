@@ -1,0 +1,76 @@
+; > RT11Hdr
+; RT11 header for BBC BASIC for the PDP-11
+; (C)J.G.Harston 2014-2023
+
+; 01-Jan-2014 v0.19: Initial version.
+; 29-Jul-2023 v0.40: Magic values replaced with EQUs.
+
+
+; Machine test values
+; -------------------
+.UKNCADDR	equ &013E	; Are we running on UKNC?
+;.UKNCOK  	equ &00E0	; =&00E0 -> UKNC
+.UKNCOK  	equ -1		; TST NEQ -> UKNC
+.VT52ADDR	equ &0070	; Are we using a VT52?
+.VT52OK 	equ &0100	; <&100 -> VT52
+.KBDCRLF	equ 1		; Keyboard <cr> always followed by <lf>
+
+ORG 0
+; The header overlaps the RT11 header, which is overwitten later
+.word  0			; 000000   VIR in Radix-50
+.word  0			; 000002   Virtual high limit
+.word  0			; 000004   Job definition word ($JSX)
+.word  0			; 000006   Reserved
+.word  0			; 000010   Reserved
+.word  0			; 000012   Reserved
+.word  0			; 000014   BPT trap PC
+.word  0			; 000016   BPT trap PSW
+.word  0			; 000020   IOT trap PC
+.word  0			; 000022   IOT trap PSW
+.word  0			; 000024   Reserved
+.word  0			; 000026   Reserved
+.word  0			; 000030   Reserved
+.word  0			; 000032   Overlay definition word
+.word  0			; 000034   Trap vector PC (TRAP)
+.word  0			; 000036   Trap vector PSW (TRAP)
+
+; RT-11 startup info at &0020 (&o0040)
+; ------------------------------------
+.word  RtCode			; 000040 - RT-11 entry point
+.word  RtStackTop		; 000042 - RT-11 top of stack
+.word  (2^6)+(2^12)+(2^14)	; 000044 - Job Status Word: NOWAIT+NOECHO+NOUPPER
+.word  0			; 000046 - USR swap address
+.word  RtCode+BasicEnd		; 000050 - Loader sets to Initial program high memory limit
+.word  0			; 000052 - Reserved
+.word  0			; 000054 - Reserved
+.word  0			; 000056 - Reserved
+
+; Normally ignored by RT-11
+; -------------------------
+.word  0			; 000060 - Reserved
+.word  0			; 000062 - Reserved
+.word  0			; 000064 - Overlay handler address
+.word  0			; 000066 - Window definition blocks
+.blkb  240-$			; 000070
+				;  to    -   Reserved
+				; 000356
+
+; RT-11 code bitmap
+; -----------------
+.byte  %11111111		; First 4K used
+.byte  %11111111		; Second 4K used
+.byte  %11111111		; Third 4K used
+.byte  %11111111		; Fourth 4K used
+.byte  %11111111		; Fifth 4K used
+.blkb  256-$			; Pad to end of bitmap
+
+; RT-11 initial stack space
+; -------------------------
+.align &200			; Pad to end of RT-11 header
+.RtStackTop			; RT-11 usually has stack here
+
+; &o1000 : RT-11 loads code from here onwards into memory at &o1000
+; -----------------------------------------------------------------
+RtCode:
+STARTADDR:			; Main code at this fixed address
+

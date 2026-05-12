@@ -1,0 +1,68 @@
+; > Errors
+; Error numbers and messages
+;				 Not used
+;   0 No room
+;   0 STOP
+;				 1 Branch out of range
+;				 2 Bad immediate/address/shift
+;				 3 Bad index/register/label
+;   4 Mistake
+;   4 Missing =
+;   5 Missing ,
+;   6 Type mismatch
+;   7 Not in a function
+;				 8 $ range
+;   9 Missing "
+;  10 Bad DIM
+;  11 DIM space
+;  12 Not LOCAL
+;  13 Not in a PROC
+;  14 Array
+;  15 Subscript
+;  16 Syntax error
+;  17 Escape      
+;  18 Division by zero
+;  19 String too long
+;  20 Too big
+;				21 -ve root
+;				22 Log range
+;				23 Accuracy lost
+;				24 Exp range
+;				25 Bad MODE
+;  26 No such variable
+;  27 Missing )
+;  28 Bad HEX, OCT or BIN
+;  29 No such FN/PROC
+; (30 Bad call)
+;  31 Arguments 
+;  32 Not in a FOR loop
+;  33 Can't match FOR
+;  34 Bad FOR variable
+; (35 Bad STEP)            	35 Too many FORs
+;  36 Missing TO
+;				37 Too many GOSUBs, No room for FN/PROC call
+;  38 No GOSUB
+;  39 ON syntax
+;  40 ON range
+;  41 No such line
+;  42 Out of DATA
+;  43 No REPEAT
+;				44 Too many REPEATs, Too many nested structures
+;  45 Missing #
+; (54 ERROR/DATA not LOCAL)
+
+; 192 C0 Can't save file
+; 198 C6 Disk full
+; 202 CA Data lost (Read error, Write error)
+; 214 D6 File not found
+; 223 DF End of file
+
+; 240 F0 Undefined instruction
+; 241 F1 Breakpoint (Abort on instruction fetch)
+; 242 F2 Bad memory access (Abort on data transfer)
+; 243 F3 Bad word access (Address exception)
+; 244 F4 Unknown IRQ
+;(245 F5 Branch through zero)
+
+; 252 FC Bad address
+; 254 FE Bad command

@@ -1,0 +1,8 @@
+| Makes PDP11 BBC BASIC with Unix I/O and BBC fall-back, with listing output
+|
+*Dir <Obey$Dir>
+*X Access ^.bbcbasic wr/r
+*/net::Software.PDP11.Assembler.AsmPDP MakeUnix ^.bbcbasic basic/lst
+*Access ^.bbcbasic r/r
+*SetType ^.bbcbasic FE6
+*IfRetVal Error Assembly error

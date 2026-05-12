@@ -1,0 +1,8 @@
+| Makes ansi VDU driver PDP11 Unix
+|
+*Dir <Obey$Dir>
+*X Access ^.ansi wr/r
+*/net::Software.PDP11.Assembler.AsmPDP ansi/mac ^.ansi ansi/lst
+*Access ^.ansi r/r
+*SetType ^.ansi FE6
+*IfRetVal Error Assembly error

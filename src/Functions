@@ -1,0 +1,2068 @@
+; > Functions 0.47
+; BASIC functions
+
+; *BUG* NumberToString sometimes adds decimal digits to integers, eg PRINT TIME -> 1234.01
+; FloatToString loses accuracy over 999999999.
+
+; 30-Jan-2008: Program functions done: PAGE, TOP, LOMEM, END, HIMEM
+;              ERL, ERR, COUNT, WIDTH, FALSE, TRUE, REPORT.
+; 10-Feb-2008: Done simple functions, ASC, LEN, CHR$, PI, NOT, SGN, ABS.
+; 30-Aug-2008: Added binary functions to dispatch table
+;              OR, EOR, AND, +, -, *, /, DIV.
+;              NumberToString does hex and integer decimal.
+; 04-Sep-2008: STRING$, STR$, LEFT$, RIGHT$, VAL, EVAL, LineNum, USR, CALL.
+; 12-Sep-2008: NumberToString does octal and binary conversions.
+;              NB! MID$ still not working properly yet, INSTR not done yet.
+; 15-May-2010: CALL addr,params done.
+; 15-Jun-2010: Comparisons done.
+; 05-Feb-2012: =DIM array(), =DIM(array(),index).
+; 25-Jun-2013: MID$ working, added integer SQR.
+; 05-Jul-2013: Floating point ADD works - but only when both signs are the same.
+;              Integer multiply retries as floats if overflows.
+;              Floating point multiply works - dropping bottom few bits.
+; 12-Jul-2013: FP multiply catches bottom bits - gives same results at 6502/ARM/x86.
+;              Floating point subtraction past zero gives correct results.
+;              Just floating point division needed now.
+; 04-Aug-2013: Well roger me sideways with a tuba! Floating point division works!
+;              Possible rounding error in 33rd bit of division result.
+;              Integer division doesn't work with negative numbers.
+; 05-Aug-2013: Division rounding works, 1/3+1/3+1/3 gives 1. Needs some tidying up.
+;              Integer multiply uses shifts, negative integers multiply as floats.
+;              Having seperate integer multiply adds 92 bytes, but increases integer
+;              multiply speed by 24%. May be able to combine integer and mantissa multiply
+;              code.
+; 14 Aug 2013: DIV/MOD working, for positive and negative numbers, MOD gives correct sign.
+;              ABS moved to UnaryMinus/Negate. Function dispatch doesn't jump via SkipSpace
+;              so eg 'TIME  $' doesn't match 'TIME$', also speeds up dispatch.
+; 20 Nov 2013: INSTR works.
+; 26 Dec 2013: String comparison done.
+; 05-Jan-2014: (neg)*(num)+0 works, now discards zero and returns (neg)*(num) instead of
+;              attempting to add zero to (neg)*(num).
+; 26-Aug-2015: EVAL copies string from buffer to stack to evaluate, as otherwise called
+;              functions that use the string buffer would overwrite the string being
+;              evaluated.
+; 31-Aug-2015: fnREPORT moved to Variables to return via FindStringVal.
+; 01-Sep-2015: High numbered functions use lookup table instead of long dispatch table.
+; 08-Sep-2015: RND(n) works, correctly gives reals 0..1 and integers 1..n. Actual numbers
+;              generated slightly difference from 6502, but underlying RNG is identical,
+;              RND gives identical integer sequence.
+; 13-Oct-2015: StringAdd copes with overlapping strings in string buffer.
+; 25-Jul-2016: SQR gets int value, not int expression. VAL"+num", VAL"-num" works.
+;              fnAddFloat adds underflow back into mantissa to round up, fractional numbers work.
+; 06-Aug-2016: fnPower does simple powers to integer exponent, some optimisation.
+; 14-Aug-2016: Updated fnAddFloat - needs some more testing.
+; 16-Aug-2016: fnAddFloat working, but bug in fnMultiplyFloat - rounding bit needs to be
+;              added into result as part of normalising, not before normalising.
+; 21-Aug-2016: Rounding bits from Multiply correctly added in when normalising, 0.5=1/2.
+; 11-Jul-2017: EVAL copes with EVAL($address).
+; 14-Jul-2017: Tokeniser returns length, allows EVAL optimisation.
+; 16-Jul-2018: FASTMUL uses Dennis Richie's fast 32-bit multiply code.
+; 20-Jul-2018: Couldn't add overflow checks to Dennis' code, so wrote replacement from scratch.
+; 06-Aug-2018: Bugfix for AddFloat from fnSubtract, need to keep Carry past ADC, also in MultFloat.
+; 16-Aug-2018: TrigLog functions moved to TrigLog, power and SQR still here.
+;              Something following here broke fnAddFloatMinus
+; 25-Aug-2018: Making progress on FloatToString, fixed at nine digits general format.
+; 26-Aug-2018: FloatToString working, fixed at G9 for floats, G10 for integers.
+; 09-May-2020: MultiplyInt only uses fast code for <&8000 x <&8000 as MUL is signed.
+; 14-Mar-2021: Commented out code in fnAddFloatMinus - fixes accummulated errors in circles.
+; 16-Mar-2021: Fixed 32-bit compare in DIV. Fixed lost Carry after SUB 0000->FFFF in DivideFloat.
+; 25-Sep-2022: Rewritten and optimised DivideFloat.
+; 18-Mar-2024: Added NOEXTRAFN option, many small optimisations, USR returns Carry.
+; 30-Jul-2024: NumberToString uses IntegerToString again, FloatToString loses accuracy over
+;              999999999. Uses fast/compact DIV-based routine. Some PDPs don't have DIV.
+
+
+; Function address table
+; ======================
+; On entry to function subroutines,
+;  r5=>character after function token, no spaces skipped
+;  r0=function token
+;  r1=dispatch address
+;  r2/r3/r4=current value, type already checked, flags irrelevant
+;  Binary operators have sp=> retaddr, previous value r2,r4,r3 or r2,length,string
+;  Unary functions have sp=> retaddr
+;
+; On exit from function subroutines,
+;  r4=b0-b15 or string start
+;  r3=b16-b31 or string length
+;  r2=type and real exponent
+;     b15=0 - numeric
+;     0000 - integer
+;     00xx - real, xx=exponent
+;     b15=1 - string
+;     8000 - normal string
+;     8100 - $address, <cr>-terminated
+;     8200 - $$address, <null>-terminated
+;
+;  flags must be set from r2 on exit
+;
+; <&80 - comparisons, return TRUE/FALSE
+EQUW fnCompare-$	; &79 - <=
+EQUW fnCompare-$	; &7A - <>
+EQUW fnCompare-$	; &7B - >=
+EQUW fnCompare-$	; &7C - <
+EQUW fnCompare-$	; &7D - =
+EQUW fnCompare-$	; &7E - >
+EQUW errNoSuchVar-$	; &7F
+;
+; >&7F - functions and operators, return a value
+.FunctionTable
+EQUW fnAND-$		; &80 - AND
+EQUW fnDIV-$		; &81 - DIV
+EQUW fnEOR-$		; &82 - EOR
+EQUW fnMOD-$		; &83 - MOD
+EQUW fnOR-$		; &84 - OR
+EQUW errNoSuchVar-$	; &28 - (
+EQUW errNoSuchVar-$	; &29 - )
+EQUW fnMultiply-$	; &2A - *
+EQUW fnAdd-$		; &2B - +
+EQUW errNoSuchVar-$	; &2C - ,
+EQUW fnSubtract-$	; &2D - -
+EQUW fnPower-$		; &5E - ^
+EQUW fnDivide-$		; &2F - /
+; <&8D - binary operators
+; >&8C - unary functions
+;							parameter
+EQUW fnLineNum-$	; &8D - linenum
+EQUW fnOPENIN-$		; &8E - OPENIN    (Interface)	string
+EQUW fnPTR-$		; &8F - PTR       (Interface)	#channel
+EQUW fnPAGE-$		; &90 - PAGE
+EQUW fnTIME-$		; &91 - TIME      (Interface)	[$]
+EQUW fnLOMEM-$		; &92 - LOMEM
+EQUW fnHIMEM-$		; &93 - HIMEM
+EQUW fnABS-$		; &94 - ABS       (Evaluate)	number
+EQUW fnACS-$		; &95 - ACS			float
+EQUW fnADVAL-$		; &96 - ADVAL     (Interface)	integer
+EQUW fnASC-$		; &97 - ASC			float
+EQUW fnASN-$		; &98 - ASN			float
+EQUW fnATN-$		; &99 - ATN			float
+EQUW fnBGET-$		; &9A - BGET      (Interface)	#channel
+EQUW fnCOS-$		; &9B - COS			float
+EQUW fnCOUNT-$		; &9C - COUNT
+EQUW fnDEG-$		; &9D - DEG			float
+EQUW fnERL-$		; &9E - ERL
+EQUW fnERR-$		; &9F - ERR
+EQUW fnEVAL-$		; &A0 - EVAL			string
+EQUW fnEXP-$		; &A1 - EXP			float
+EQUW fnEXT-$		; &A2 - EXT       (Interface)	#channel
+EQUW fnFALSE-$		; &A3 - FALSE
+EQUW fnFN-$		; &A4 - FN        (Commands)	name
+EQUW fnGET-$		; &A5 - GET       (Interface)
+EQUW fnINKEY-$		; &A6 - INKEY     (Interface)	integer
+EQUW fnINSTR-$		; &A7 - INSTR(			string
+EQUW fnINT-$		; &A8 - INT       (Evaluate)	number
+EQUW fnLEN-$		; &A9 - LEN			string
+EQUW fnLN-$		; &AA - LN			float
+EQUW fnLOG-$		; &AB - LOG			float
+EQUW fnNOT-$		; &AC - NOT			integer
+EQUW fnOPENUP-$		; &AD - OPENUP    (Interface)	string
+EQUW fnOPENOUT-$	; &AE - OPENOUT   (Interface)	string
+EQUW fnPI-$		; &AF - PI
+EQUW fnPOINT-$		; &B0 - POINT(    (Interface)	integer
+EQUW fnPOS-$		; &B1 - POS       (Interface)
+EQUW fnRAD-$		; &B2 - RAD			float
+EQUW fnRND-$		; &B3 - RND			[(]
+EQUW fnSGN-$		; &B4 - SGN			number
+EQUW fnSIN-$		; &B5 - SIN			float
+EQUW fnSQR-$		; &B6 - SQR			float
+EQUW fnTAN-$		; &B7 - TAN			float
+EQUW fnTO-$		; &B8 - TO
+EQUW fnTRUE-$		; &B9 - TRUE
+EQUW fnUSR-$		; &BA - USR			integer
+EQUW fnVAL-$		; &BB - VAL			string
+EQUW fnVPOS-$		; &BC - VPOS      (Interface)
+EQUW fnCHRs-$		; &BD - CHR$			integer
+EQUW fnGETs-$		; &BE - GET$      (Interface)	[#]
+EQUW fnINKEYs-$		; &BF - INKEY$    (Interface)	integer
+EQUW fnLEFTs-$		; &C0 - LEFT$(			string
+EQUW fnMIDs-$		; &C1 - MID$(			string
+EQUW fnRIGHTs-$		; &C2 - RIGHT$(			string
+EQUW fnSTRs-$		; &C3 - STR$			[~]
+EQUW fnSTRINGs-$	; &C4 - STRING$(		integer
+EQUW fnEOF-$		; &C5 - EOF       (Interface)	#channel
+
+; High numbered tokens used as functions
+EQUW fnEND-$		; &CC - &E0 - END
+EQUW fnMODE-$		; &CD - &EB - MODE      (Interface)
+EQUW fnVDU-$		; &CE - &EF - VDU       (Interface)  integer
+EQUW fnREPORT-$		; &CF - &F6 - REPORT
+#ifndef NOEXTRAFN
+ EQUW fnQUIT-$		; &C6 - &C8 - LOAD, QUIT, SYS
+ EQUW fnPTR-$		; &C7 - &CF - PTR       (Interface)  #channel
+ EQUW fnPAGE-$		; &C8 - &D0 - PAGE
+ EQUW fnTIME-$		; &C9 - &D1 - TIME      (Interface)  [$]
+ EQUW fnLOMEM-$		; &CA - &D2 - LOMEM
+ EQUW fnHIMEM-$		; &CB - &D3 - HIMEM
+ EQUW fnDIM-$		; &D0 - &DE - DIM       (Variables)
+ EQUW fnWIDTH-$		; &D1 - &FE - WIDTH
+ EQUW fnOSCLI-$		; &D2 - &FF - OSCLI     (Interface)  string
+#endif
+
+.FunctionBytes
+EQUB &E0,&EB,&EF,&F6		; END, MODE, VDU, REPORT
+#ifndef NOEXTRAFN
+ EQUB &C8,&CF,&D0,&D1,&D2,&D3	; QUIT, cmdPTR, cmdPAGE, cmdTIME, cmdLOMEM, cmdHIMEM
+ EQUB &DE,&FE,&FF		; DIM, WIDTH, OSCLI as functions
+#endif
+EQUB &00
+ALIGN
+
+
+; String functions
+; ~~~~~~~~~~~~~~~~
+
+; Test for conversion character
+; -----------------------------
+; On exit: CC=no conversion character, r1 preserved
+;          CS=conversion character found
+;          r1=&84xx - ~hex    - 4 bits per digit
+;          r1=&83xx - #octal  - 3 bits per digit
+;          r1=&81xx - /binary - 1 bit per digit
+.fnConversion
+mov r1,-(sp)		; Save current flag
+bic #&FF00,r1		; Set flag to decimal
+bis #&8400,r1		; Set flag to hex
+cmp r0,#ASC"~"
+beq fnConvGo		; Convert to hex string
+sub #&0100,r1		; Set flag to octal
+cmp r0,#ASC"="
+beq fnConvGo		; Convert to oct string
+sub #&0200,r1		; Set flag to binary
+cmp r0,#ASC"/"
+beq fnConvGo		; Convert to binary string
+mov (sp)+,r1		; Get saved flag
+clc			; Set 'no conversion flag'
+rts pc
+.fnConvGo
+tst (sp)+		; Drop saved flag
+inc r5			; Step past conversion flag
+rts pc
+
+.fnSTRs
+jsr pc,SkipSpaceThis
+clr r1			; Set to decimal
+jsr pc,fnConversion	; Check for ~/# character and set r1 to conversion flag
+mov r1,-(sp)		; Save dec/hex flag
+jsr pc,EvalNumVal
+mov (sp)+,r1		; Get dec/hex flag back
+;mov SV_VARS+2,r0	; R0=print format
+;cmp r0,#&0100
+;bcc NumberToString	; @%=&nnxxxxxx, use @% format
+;clr r0			; @%=&00xxxxxx, use general format
+			; Fall through into number conversion
+
+
+; Convert a number to a string
+; ----------------------------
+; On entry: r0=?
+;           r1=hex/oct/bin flag in b15-b8
+;           r2=exponent
+;           r3,r4=integer/mantissa
+; On exit:  r5 preserved
+;           r4=>string
+;           r3=length
+;           r2='string' type, flags set
+;           r1 corrupted
+;           r0=>byte after end of string
+.NumberToString
+adr  SV_STRING,r0	; Point to string buffer
+tst  r1
+bpl  DecimalToString	; b15 clear, convert to decimal
+
+; Output in hex, oct or bin
+; -------------------------
+jsr  pc,EnsureInteger	; If float, convert to integer, preserves R0,R1
+;.NumberToHexEtc
+clr  -(sp)		; 4(sp)=leading zero flag
+swab r1			; Get base to bottom byte
+bic  #&FFF0,r1		; Reduce to 1,3,4
+mov  r1,-(sp)		; 2(sp)=bits per digit
+mov  #31,-(sp)		; (sp)=number of bits-1
+mov  r1,r2		; r2=bits for this digit
+bit  #2,r2
+beq  NumToStrLp1	; Not octal, go ahead
+dec  r2			; Only two bits in first octal digit
+.NumToStrLp1
+clr  r1			; Clear digit accumulator
+.NumToStrLp2
+rol  r4			; Rotate bits into r0
+rol  r3
+rol  r1
+dec  (sp)		; Dec bit counter
+dec  r2			; Dec bits for this digit
+bne  NumToStrLp2
+tst  r1
+bne  NumToStrDigit	; Not zero, output digit
+mov  4(sp),r1		; Check leading zero flag
+beq  NumToStrNxt	; Nothing output yet
+.NumToStrDigit
+bis  #ASC"0",r1		; Convert to digit
+cmp  r1,#ASC"9"+1
+bcs  NumToStrOut
+add  #7,r1		; Convert hex digit
+.NumToStrOut
+movb r1,(r0)+		; Put character in string buffer
+mov  #ASC"0",4(sp)	; Output zeros from now on
+.NumToStrNxt
+mov  2(sp),r2		; Set number of bits for next digit
+tst  (sp)		; All digits done yet?
+bpl  NumToStrLp1	; Loop back for more
+cmp  (sp)+,(sp)+	; Drop bit count and bits/digit
+tst  (sp)+		; Still no leading zeros?
+bne  NumToStrDone
+.NumToStrZero
+movb #ASC"0",(r0)+	; Output '0' for &0
+.NumToStrDone
+adr  SV_STRING,r4	; r4=>string
+mov  r0,r3		; r3=>end
+sub  r4,r3		; r3=length
+mov  #&8000,r2		; r2='string', flags set
+rts  pc			; r0=>end, r1 corrupted
+
+;#define FLOATPRINT	; Use FloatToString for integers, with saving of memory
+
+; Output in decimal
+; -----------------
+.DecimalToString
+tst  r3			; Check sign bit
+bpl  DecimalNotNeg
+movb #ASC"-",(r0)+	; Put '-' sign in string buffer
+jsr  pc,NegateNumber
+.DecimalNotNeg
+#ifdef FLOATPRINT
+ jsr  pc,EnsureFloat	; Force to float, preserves r0,r1
+ tst  r2		; Float with exp=0 must be zero
+ beq  NumToStrZero	; to do: check format
+#else
+ tst  r2
+ beq  IntegerToString	; Integer, convert as integer
+#endif
+
+; Output float in decimal
+; -----------------------
+;bic #&8000,r3		; Ensure positive
+mov  r0,-(sp)		; Save output pointer
+clr  -(sp)		; Decimal places
+.FloatCheckLower
+cmp  r2,#&80		; Check exponent
+bcc  FloatCheckUpper	; 2^0 or more, 1.0 or greater
+mov  #&2000,-(sp)
+mov  #&0000,-(sp)	; Stack 10.0
+mov  #&0083,-(sp)
+jsr  pc,fnMultiplyFloat2 ; Multiply by ten; corrupts r0,r1
+dec  (sp)		; Decrement decimal places - fractional digits
+br   FloatCheckLower	; Loop until 1.0 or greater
+;
+.FloatCheckUpper
+cmp  r2,#&83		; Check exponent
+bcs  FloatWithinBounds	; Less than 2^3, less than 8, within 1-9.9999 range
+bne  FloatDivide10	; 2^4 or greater, 16 or greater, reduce to get in range
+cmp  r3,#&2000
+bcs  FloatWithinBounds	; Between 8 and 9.999, within range
+.FloatDivide10
+mov  #&4CCC,-(sp)
+mov  #&CCCD,-(sp)	; Stack 1/10
+mov  #&007C,-(sp)	;
+jsr  pc,fnMultiplyFloat2 ; Multiply by 1/10 - divide by 10
+inc  (sp)		; Increment number of decimal places
+br   FloatCheckLower	; Loop until within 1.0 to 9.9999
+;
+.FloatWithinBounds
+;cmp  (sp),#9		; Maxiumum of 9 digits
+;bcs  FloatWithinBounds2
+;jmp  errTooBig		; Too many digits
+.FloatWithinBounds2
+mov  #&2BCC,-(sp)	; 9 digits add 0.000000005
+mov  #&7712,-(sp)	;
+mov  #&0064,-(sp)	;
+mov  #&80,r0		; b7=1, not compare
+jsr  pc,fnAddFloat1	; Round final digit
+bis  #&8000,r3		; Insert leading 1
+;
+.FloatAdjustToBCD
+cmp  #&82,r2		; Check exponent
+bcs  FloatOutput	; exp>&82, num=man*2^8, man b31-b28 is BCD of decimal number
+ror  r3			; Divide mantissa by 2
+ror  r4
+inc  r2			; Increment exponent by 2 to balance
+br   FloatAdjustToBCD	; Loop until exponent=&83, man*2^8
+;
+.FloatOutputUnity
+clr  r4
+mov  #&1000,r3		; r3/4=1.0
+inc  (sp)		; Increment number of decimal places
+;
+.FloatOutput
+cmp  r3,#&A000
+bcc  FloatOutputUnity	; Jump back to output 1.000
+mov  (sp)+,r2		; Get decimal places counter to R2
+mov  (sp)+,r0		; Get output pointer back to R0
+mov  #10,-(sp)		; Ten digits
+mov  r2,-(sp)		; Put decimal places counter back on stack
+bpl  FloatDigits	; num>=1.0, start outputting digits
+movb #ASC"0",(r0)+	; Output leading '0.'
+movb #ASC".",(r0)+
+dec  2(sp)		; Decrement number of digits
+br   FloatSmall		; Small number, output leading zeros
+.FloatSmallLp
+movb #ASC"0",(r0)+	; Output '0' after decimal point
+.FloatSmall
+dec  2(sp)		; Decrement number of digits
+inc  (sp)		; Increment decimal places counter
+bmi  FloatSmallLp	; Loop while still more after decimal point
+mov  #&80,(sp)		; We've already output the decimal point
+;
+.FloatDigits
+inc  (sp)
+.FloatDigitsLoop
+mov  r3,r1		; Get top of mantissa
+swab r1			; Move b31-b28 to b3-b0 of R1
+ror  r1
+ror  r1
+ror  r1
+ror  r1
+bic  #&FFF0,r1		; Reduce to 0-9
+bis  #ASC"0",r1		; Convert to ASCII
+movb r1,(r0)+		; Store in buffer
+bic  #&F000,r3		; Drop top nybble from mantissa
+jsr  pc,EvalTimes10	; mantissa=mantissa*10, corrupts r1,r2
+dec  (sp)		; Decrement decimal places counter
+bne  FloatNoPoint
+movb #ASC".",(r0)+	; Passing decimal place zero, output decimal point
+.FloatNoPoint
+dec  2(sp)
+bpl  FloatDigitsLoop	; Loop for all significal digits
+dec  r0			; Step back to last proper digit
+dec  r0
+.FloatDropZeros
+movb -(r0),r1
+cmp  r1,#ASC"."
+beq  FloatDropPoint	; Trailing decimal point, drop it
+cmp  r1,#ASC"0"
+beq  FloatDropZeros	; Trailing zero, drop it and check for another
+inc  r0			; Keep this final digit
+.FloatDropPoint
+cmp  (sp)+,(sp)+	; Drop decimal places counter and digits counter
+jmp  NumToStrDone
+
+#ifndef FLOATPRINT
+; Output integer in decimal
+; -------------------------
+.IntegerToString
+;
+#ifdef NODIV
+;jsr  pc,EnsureInteger	; Force float to integer, preserves R0,R1
+clrb (r0)		; Flag 'no digits yet'
+adr  DecimalPowers,r2	; Point to divisors
+.IntegerNextDigit
+clr  r1			; Set digit to zero
+.IntegerLoop
+cmp  2(r2),r3
+bcs  IntegerSub		; eg, r3/r4 > &3B9Axxxx, must be &3B9B or higher
+beq  IntCheckLow	; eg, r3/r4 = &3B9Axxxx, check low word
+bcc  IntegerDigit	; eg, r3/r4 =< &3B9Axxxx, must be < &3B9A0000
+.IntCheckLow
+cmp  (r2),r4
+bcs  IntegerSub		; eg, r3/r4 > &3B9ACA00
+beq  IntegerSub		; eg, r3/r4 = &3B9ACA00
+bcc  IntegerDigit	; eg, r3/r4 =< &3B9ACA00, must be <&3B9ACA00
+.IntegerSub
+sub  (r2),r4
+sbc  r3
+sub  2(r2),r3		; r3/r4=r3/r4-divisor
+inc  r1			; Increment digit
+br   IntegerLoop
+.IntegerDigit
+tst  r1			; r0=digit
+bne  IntegerNotZero
+tstb (r0)		; Any digits yet?
+beq  IntegerLeadingZero
+.IntegerNotZero
+bis  #ASC"0",r1
+movb r1,(r0)+		; Store digit
+movb #13,(r0)		; Flag 'some digits done'
+.IntegerLeadingZero
+cmp  (r2)+,(r2)+	; r2=r2+4, point to next divisor
+tst  (r2)		; End of divisor table?
+bne  IntegerNextDigit	; Do more units
+bis  #ASC"0",r4
+movb r4,(r0)+		; Store final digit
+jmp  NumToStrDone
+
+.DecimalPowers
+equd 1000000000
+equd 100000000
+equd 10000000
+equd 1000000
+equd 100000
+equd 10000
+equd 1000
+equd 100
+equd 10
+equw 0
+#else
+; 32-bit decimal printout
+; =======================
+; *BUG* This gives Bad word access on some PDP11s.
+; On entry: r0=>string buffer
+;           r1=hex/oct/bin flag in b15-b8
+;           r2=exponent
+;           r3,r4=integer/mantissa
+; On exit:  r0=>byte after end of string
+;           r1 corrupted
+;
+		MOV  R4,R2	; R2=number b0-b15
+		;MOV R3,R3	; R3=number b16-b31
+.prdec32	MOV  #-1,-(SP)	; Stack terminator
+.prdec32lp1	MOV  R2,-(SP)	; Save low order 16 bits of dividend
+		CLR  R2		; Divide high order 16 bits of dividend by the divisor
+		DIV  #10,R2	;  R0=R0:R1 DIV R2, R1=R0:R1 MOD R2
+		MOV  R2,R1	; Save high order 16 bits of quotient
+		MOV  R3,R2	; Divide the remainder
+		MOV  (SP),R3	;  of the dividend by the divisor
+		DIV  #10,R2	;  R0=R0:R1 DIV R2, R1=R0:R1 MOD R2
+		BIS  #ASC"0",R3	; Convert remainder to ASCII digit
+		MOV  R3,(SP)	; Stack it
+		MOV  R1,R3	; R1=result b16-b31, R0=result b0-b15
+		BIS  R2,R1
+		BNE  prdec32lp1	; Loop until number is zero
+.prdec32lp2	MOV  (SP)+,R1	; Pop digit off
+		BMI  prdec32done; Terminator, all done
+		MOVB R1,(R0)+	; Store in buffer
+		BR   prdec32lp2	; Loop for another
+.prdec32done	jmp  NumToStrDone
+#endif
+#endif
+
+
+.fnLEFTs
+.fnRIGHTs
+mov r0,-(sp)		; Save LEFT$/RIGHT$ token
+jsr pc,EvalString
+mov (sp)+,r0
+jsr pc,StackStringAndOp	; sp=> LEFT$/RIGHT$, &8xnn, string...
+jsr pc,EvalComma
+jsr pc,CheckClose
+mov (sp),r0		; r0=LEFT$/RIGHT$ token
+mov r4,r1
+jsr pc,UnstackStringDropOp ; Get string from stack
+; r0=LEFT$/RIGHT$ token	   ; This could be sped up by manipulating
+; r1=wanted length	   ; the string directly on the stack, then
+; r2=type          &8xnn   ; StackDrop-ing it. Still need to then
+; r3=source length &00nn   ; copy it to string buffer though.
+; r4=>source string
+mov r3,r2
+cmp r1,r3
+bcc fnLEFTall
+cmpb r0,#tknLEFTs
+beq fnLEFTdo
+add r3,r4
+sub r1,r4
+.fnLEFTdo
+mov r1,r2
+.fnLEFTall
+mov r2,r3
+mov #&8000,r2		; r2=string type, flags set
+rts pc
+
+.fnMIDs
+jsr  pc,EvalString	; MID$(string
+jsr  pc,StackStringAndOp
+jsr  pc,EvalComma	; MID$(string,start
+mov  #255,r1		; Prepare wanted=255
+cmpb r0,#ASC")"
+beq  fnMID2		; MID$(string,start)
+mov  r4,-(sp)		; Save start
+jsr  pc,EvalComma	; MID$(string,start,length
+mov  r4,r1		; r1=wanted length
+mov  (sp)+,r4		; r4=start
+.fnMID2
+jsr  pc,CheckClose	; MID$(string,start[,length])
+mov  r4,r0
+beq  fnMID3		; start position=0 same as =1
+dec  r0			; r0=start position, 0=first character
+.fnMID3
+; r0=start position, 0=first character
+; r1=wanted length
+jsr  pc,UnstackStringDropOp
+; r0=start position, 0=first character
+; r1=wanted length
+; r2=type           &80nn
+; r3=source length  &00nn
+; r4=>source string in string buffer
+mov  r1,r2
+add  r0,r2		; r2=wanted length+start position
+cmp  r2,r3		; is end position past end of source string?
+bcs  fnMIDshort		; end<length, ok to use wanted length
+mov  r3,r2
+sub  r0,r2		; r2=source length-start position
+mov  r2,r1		; r1=wanted length, start position to end of string
+.fnMIDshort
+; r0=start position, 0=first character
+; r1=validated wanted length
+; r3=source length
+; r4=>source string
+cmp  r0,r3
+bcc  fnMIDlong		; start>end
+add  r0,r4		; r4=new string start
+mov  r1,r3		; r3=new string length
+mov  #&8000,r2		; r2=string type
+rts  pc
+.fnMIDlong
+clr  r3			; Null string
+mov  #&8000,r2		; r2=string type, flags set
+rts  pc
+
+.fnSTRINGs
+jsr pc,EvalInteger	; STRING$(num
+bic #&FF00,r4		; Ensure num is 0-255 only
+mov r4,-(sp)		; Stack num
+jsr pc,CheckComma	; STRING$(num,
+jsr pc,EvalString	; STRING$(num,string
+jsr pc,CheckClose	; STRING$(num,string)
+mov r3,r0		; r0= source length
+jsr pc,EnsureString	; Ensure string is at start of string buffer
+mov r4,r1		; r1=>source string
+mov (sp)+,r4		; r4= multiplier
+clr r3			; r3= dest length
+tst r4
+beq fnSTRINGdone	; zero length, use it
+adr SV_STRING,r2	; r2=>dest string
+mov r1,-(sp)		; Save source start
+mov r0,-(sp)		; Save source length
+.fnSTRINGlp1
+mov (sp),r0		; Get source start
+mov 2(sp),r1		; Get source length
+.fnSTRINGlp2
+movb (r1)+,(r2)+	; Copy characters
+inc r3
+bit #&FF00,r3
+bne errStringTooLong
+dec r0
+bne fnSTRINGlp2		; Copy one copy
+dec r4			; Decrement number of multiples
+bne fnSTRINGlp1		; Loop to copy another copy
+cmp (sp)+,(sp)+		; Drop source start and length from stack
+br  fnSTRINGdone
+
+;.fnSTRINGzero
+;adr SV_STRING,r4	; r4=>output string
+;mov #&8000,r2		; r2=string type, flags set
+;rts pc
+
+.fnCHRs
+jsr  pc,EvalIntVal
+movb r4,SV_STRING	; Put char in string buffer
+mov  #1,r3		; Length=1
+.fnSTRINGdone
+adr  SV_STRING,r4	; Point to string
+mov  #&8000,r2		; Type=String
+rts  pc
+
+.fnINSTR
+jsr pc,EvalString	; Evaluate 'haystack' string
+jsr pc,StackStringAndOp	; Stack string and dummy Op
+jsr pc,CheckComma
+jsr pc,EvalString	; Evaluate 'needle' string
+mov #1,r1		; Default start at 1st character
+cmpb (r5),#ASC")"
+beq fnINSTR1		; INSTR(str1,str2) - use default start position
+jsr pc,StackStringAndOp	; Stack 'needle' string
+jsr pc,EvalComma	; Get start position
+mov r4,r1		; r0=start position
+jsr pc,UnstackStringDropOp ; Get 'needle' string back
+.fnINSTR1
+jsr pc,CheckClose	; Ensure closing bracket
+mov r4,(sp)		; Save start of needle string
+clr r4			; Prepare for 'not found'
+tst r3
+beq fnINSTRdone		; needle=""
+bic #&FF00,2(sp)	; Remove type from haystack type+length
+beq fnINSTRdone		; haystack=""
+;
+; r4=>step through needle string
+; r3= length of needle string
+; r2=>step through haystack string
+; r1= search start position, 1=1st character
+; r0= count of needle string
+; sp=>start of needle string, length, 'haystack' string...
+;
+dec r1			; Prepare for following increment
+.fnINSTRlook
+clr r4			; Prepare for 'not found'
+mov r1,r0
+add r3,r0		; start+LEN(needle)
+cmp 2(sp),r0		; Compare with LEN(haystack)
+bcs fnINSTRdone		; No more haystack to search, return r4=0
+inc r1			; Step to next start position
+mov sp,r2
+add #3,r2		; r2=>haystack on stack-1
+add r1,r2		; Add offset to current start
+mov (sp),r4		; Get start of needle
+mov r3,r0		; Get current needle count
+.fnINSTRloop
+cmpb (r2)+,(r4)+	; Compare characters
+bne fnINSTRlook		; Different, restart at next haystack char
+dec r0			; Decrement needle count
+bne fnINSTRloop		; Loop through all needle chars
+mov r1,r4		; All match, retvalue=start
+.fnINSTRdone
+jsr pc,UnstackDropStringOp ; Drop haystack from stack
+clr r3
+clr r2			; Return integer, flags set
+rts pc
+
+.errStringTooLong
+jsr  pc,Error
+equb 19,"String too long",0
+align
+
+
+; String operators
+; ~~~~~~~~~~~~~~~~
+
+; Addition - <string> + <string>
+; ------------------------------
+.fnAddString		; <string> + <string>
+; On entry, r4=>RHS string (which may be in the string buffer, not necc'ly at start)
+;           r3= RHS string length
+;           sp=>retaddr, LHS &8x00+length, LHS string on stack
+mov  2(sp),r2		; Get stacked string type+length
+bic  #&FF00,r2		; Remove string type
+mov  r3,r0
+add  r2,r0		; Find combined string length
+;bic  #&FF00,2(sp)	; Remove type from stacked length
+;mov  r3,r0
+;add  2(sp),r0		; Find combined string length
+cmp  r0,#256		; String too long?
+bcc  errStringTooLong
+
+;;;
+tst  r3
+beq  fnAddStr2		; RHS string is zero length
+adr  SV_STRING,r1	; Point to string buffer
+add  r2,r1		; r1=>start of dest for RHS in string buffer
+cmp  r4,r1		; Where is RHS compared to string buffer?
+bcc  fnAddStrLp2	; RHS string in high memory, copy upwards
+add  r3,r1		; Point to end of string destination
+add  r3,r4		; Point to end of string source
+.fnAddStrLp1
+movb -(r4),-(r1)	; Copy string downwards
+dec  r3
+bne  fnAddStrLp1
+br   fnAddStr2
+.fnAddStrLp2
+movb (r4)+,(r1)+	; Copy string upwards
+dec  r3
+bne  fnAddStrLp2
+;;;
+
+;adr  SV_STRING,r1	; Point to string buffer
+;add  r0,r1		; Add length of joined string
+;tst  r3
+;beq  fnAddStr2		; Current string is zero length
+;add  r3,r4		; Point to end of current string
+;.fnAddStrLp2
+;movb -(r4),-(r1)	; Copy character to end of string buffer
+;dec  r3
+;bne  fnAddStrLp2	; Loop to copy current string
+
+.fnAddStr2
+mov  (sp)+,r1		; Pop return address
+jsr  pc,UnstackString	; Pop string from stack to start of string buffer
+; r2=type   &8xnn
+; r3=length &00nn
+; r4=>string
+mov  r0,r3		; r3=combined string length
+mov  #&8000,r2		; r2=string type, flags set
+jmp  (r1)		; Return via r1
+
+; String comparisons - <value> <cmp> <value>
+; ------------------------------------------
+; On entry, r4=>RHS string
+;           r3= RHS string length
+;           r0       = operator token
+;           sp=>retaddr, LHS &8x00+length, LHS string
+;
+.fnCompareString
+mov  sp,r2
+;add  #4,r2		; r2=>LHS string
+;mov  2(sp),r1
+tst  (r2)+		; r2=>length
+mov  (r2)+,r1		; r2=>string, r1=length
+bic  #&FF00,r1		; r1=LHS length
+cmp  r1,r3
+bcs  fnCompareStr1
+mov  r3,r1		; r1=shortest string length
+.fnCompareStr1
+inc  r1			; Balance next dec r1
+br   fnCompareStrTest
+
+; r4=>RHS string
+; r3= RHS string length
+; r2=>LHS string
+; r1= count of shortest string
+; r0= operator token
+;
+.fnCompareStrLp
+cmpb (r2)+,(r4)+	; Compare characters
+bne  fnCompareStrDiff	; Different within shortest length
+.fnCompareStrTest
+dec  r1
+bne  fnCompareStrLp	; Loop while strings same for shortest length
+mov  2(sp),r1		; Compare length of strings
+bic  #&FF00,r1		; r1=LHS length
+clr  r4			; r4=0  - strings equal
+cmp  r1,r3
+beq  fnCompareStrDone
+;.fnCompareStrDiff	; flags set according to compare
+;beq  fnCompareStrEq
+.fnCompareStrDiff	; flags set according to compare
+mov  #1,r4		; r4=1  - LHS > RHS
+bcc  fnCompareStrDone
+mov  #-1,r4		; r4=-1 - LHS < RHS
+;br   fnCompareStrDone
+;.fnCompareStrEq
+;clr  r4		; r4=0  - strings equal
+.fnCompareStrDone
+mov  (sp),r1		; Get return address
+jsr  pc,UnstackDropStringOp; r0/r1/r4 preserved
+mov  r1,-(sp)		; Restack return address
+jmp  fnCompareDoneR4	; Convert R4 and R0 into TRUE/FALSE result
+
+
+; Numeric operations
+; ~~~~~~~~~~~~~~~~~~
+; On entry, LHS and RHS are either both numbers or both strings
+; Comparisons and '+' allow strings and numbers
+; All others pre-check to only allow numbers
+;
+
+; Comparisons - <value> <cmp> <value>
+; ===================================
+; On entry, r2/r3/r4 = RHS value
+;           r0       = operator token
+;           sp=>retaddr, r2/r4/r3 = LHS value
+.fnCompare
+tst  r2			; Check for <num> <cmp> <num>
+bmi  fnCompareString	; Jump to compare strings
+			; Fall through to subtract and check result afterwards
+
+; Subtraction - <number> - <number>
+; =================================
+; On entry, r2/r3/r4 = RHS value
+;           r0       = operator token
+;           sp=>retaddr, r2/r4/r3 = LHS value
+.fnSubtract
+jsr  pc,NegateNumber	; Change to <number> + -<number>
+			; Fall through into Addition
+
+; Addition - <value> + <value>
+; ============================
+; On entry, r2/r3/r4 = RHS value
+;           r0       = operator token
+;           sp=>retaddr, r2/r4/r3 = LHS value
+.fnAdd
+tst  r2
+bmi  fnAddString	; Jump with   <string> + <string>
+bne  fnAddFloat		; Jump with   <number> + <float>
+			; We now have <number> + <integer>
+tst  2(sp)
+bne  fnAddFloat1	; Jump with    <float> + <integer>
+;
+; Integer addition - <integer> + <integer>
+; ----------------------------------------
+; Also: add zero to float
+; Note what happens to &7FFFFFFF+1. As with 6502 BASIC wraps to &80000000.
+;
+.fnAddInt
+mov  (sp)+,r1		; Pop return address
+mov  (sp)+,r2		; Get exponent
+add  (sp)+,r4		; Add b0-b15
+adc  r3			; Add carry from b0-b15
+add  (sp)+,r3		; Add b16-b31
+tstb r0			; Check operator token
+bpl  fnCompareDoneR1	; b7=0, jump to return result of comparison
+tst  r2			; Set flags
+jmp  (r1)		; Return via r1
+
+; Floating point addition
+; -----------------------
+;			;       stack       registers
+.fnAddFloat		; <integer/float> + <float>
+;tst  2(sp)
+;bne  fnAddFloat1	; Value on stack is already a float
+jsr  pc,SwapStack	;         <float> + <integer/float>
+.fnAddFloat1		;         <float> + <integer> or <f>+<i/f> from above
+jsr  pc,EnsureFloat	;         <float> + <float>
+jsr  pc,SwapStackMin	; Get smaller <float> into r2/r3/r4, corrupts r1
+mov  r2,r1		; Test for zero
+bis  r3,r1
+bis  r4,r1
+beq  fnAddInt		; Use AddInt to add zero to float and test
+
+; r2/r3/r4 has smaller value, now denormalise it so exponents are same
+;
+; eg   82 80 00 00 00     1*2^2    4  (replacing sign with leading '1')
+; plus 80 80 00 00 00     1*2^0    1
+; becomes
+;      82 80 00 00 00     1*2^2    4
+;      82 20 00 00 00  0.25*2^2    1 plus
+;      82 A0 00 00 00  1.25*2^2    5 equals
+;
+;#ifdef DEBUG
+;jsr pc,Debug_DumpStack
+;jsr pc,Debug_DumpRegsFlags
+;#endif
+
+.fnAddFloat2
+mov  6(sp),r1		; Get sign of stacked value
+xor  r3,r1		; r1=signs are different
+cmp  6(sp),#&8000	; b31=NOT sign of stacked value, will be sign of result
+ror  r1
+sub  #&8000,r1		; b31=sign of result, b30=signs are different
+bic  #&3FFF,r1		; Clear all except sign flags
+bis  r1,r0		; b31=result, b30=subtract, b7=not comparison, b6-b0=operation
+jsr  pc,fnFloatMantissa	; Put leading '1's into mantissas
+;#ifdef DEBUG
+;jsr pc,Debug_DumpRegsFlags
+;#endif
+clr  r1			; r1=0 for underflow
+.fnAddFloatLp
+cmp  r2,2(sp)
+bcc  fnAddSameExponents	; Both values now have same exponent
+clc
+ror  r3
+ror  r4			; Divide mantissa by two
+ror  r1			; Keep underflow
+inc  r2			; Increment exponent to multiply by two
+br   fnAddFloatLp	; Loop to check again
+;
+.fnAddSameExponents	; Both exponents are now the same
+asl  r1			; Add any underflow back into mantissa
+adc  r4
+adc  r3
+;
+; r0=<sign flag><different>..<compare><token>
+; r1=<underflow from rotation>
+; r2=updated exponent
+; r3=updated mantissa
+; r4=updated mantissa
+; 2(sp)=stacked exponent
+; 4(sp)=stacked mantissa
+; 6(sp)=stacked mantissa
+;
+; if signs are the same, addition
+; if signs are different, subtraction, need to two's complement number
+;
+;#ifdef DEBUG
+;jsr pc,Debug_DumpRegsFlags
+;#endif
+
+bit  #&4000,r0
+beq  fnAddFloatNotNeg	; Signs the same, addition
+jsr  pc,NegateInteger	; Negate r3/r4 mantissa, preserves r0/r1/r2
+.fnAddFloatNotNeg
+;#ifdef DEBUG
+;jsr pc,Debug_DumpRegsFlags
+;#endif
+;
+; Add mantissas
+; Have swapped so registers always hold smallest absolute value, so
+; will never pass through zero, sign of result is sign of largest value
+; Cannot underflow, only possible to remain in same exponent range
+; (eg 5.xxx (2^2+1.xxx) + 2.xxx (2^2+0.xxx) => 7.xxx (2^2+3.xxx))
+; or overflow to next exponent range
+; (eg 7.xxx (2^2+3.xxx) + 7.xxx (2^2+3.xxx) => 15.xxx (2^3+7xxx))
+; Not possible to overflow by two exponents
+; (eg 7.999999999+7.99999999 => 15.99999999)
+;
+mov  (sp)+,r1		; Pop return address
+mov  (sp)+,r2		; Pop exponent
+add  (sp)+,r4		; Add b0-b15
+adc  r3			; Add carry from b0-b15
+bcc  fnAddFloatNoCy	; Did not roll past &FFFFxxxx
+add  (sp)+,r3		; Add b6-b31
+sec			; Set Cy again as rolled past &FFFFxxxx
+br   fnAddFloatCy
+.fnAddFloatNoCy
+add  (sp)+,r3		; Add b16-b31, Cy may or may not be set
+.fnAddFloatCy
+;
+; Need to work out a test case where (sp) is &FFFF and correct case needs Cy set
+;#ifdef DEBUG
+;jsr pc,Debug_DumpRegsFlags
+;#endif
+;
+; after ADD         after SUB
+; xxx- -> ok        xxxC -> ok
+; xxxC -> overflow  xxx- -> passed zero, need to negate and flip sign
+;
+bit  #&4000,r0
+; see fnAddFloatMinus
+bne  fnAddFloatMinus	  ; Check result after subtraction
+;
+mov  r1,-(sp)		  ; Stack return address
+bcc  fnFloatNormalNoRound ; No overflow, insert sign and check comparison
+ror  r3			  ; Rotate overflow into mantissa and divide by two
+ror  r4
+;adc  r4		  ; Add underflow back into mantissa
+;adc  r3
+inc  r2			  ; Increment exponent to multiply by two
+br   fnFloatNormalNoRound ; Insert sign and check comparison
+;
+.fnAddFloatMinus
+;#ifdef DEBUG
+;jsr pc,Debug_DumpRegsFlags
+;#endif
+
+;
+bcs  fnFloatNormalise2	; Not passed zero, normalise and insert sign
+;;tst  r0				;;diff from v0.27 - this causes Circle to build errors
+;;bpl  fnFloatNormalise2		;;diff from v0.27 - why was this put in?
+jsr  pc,NegateInteger	; Negate r3/r4 mantissa, preserves r0/r1/r2
+sub  #&8000,r0		; Toggle sign
+br   fnFloatNormalise2	; Normalise and insert sign
+
+
+; Normalise a result
+; ------------------
+; r3:r4=mantissa
+; r2   =exponent
+; r1   =return address
+; r0   =<sign of result><operator>
+;
+.fnFloatNormalise	; Enter here from multiply/divide
+bis  #&80,r0		; Set b7='not a compare'
+.fnFloatNormalise2	; Enter here from add/sub to follow with compare
+;#ifdef DEBUG
+;jsr pc,Debug_DumpRegsFlags
+;#endif
+mov  r1,-(sp)		; Put return address back onto stack
+clr  r1
+.fnFloatNormaliseDiv	; Enter here from division
+.fnFloatNormaliseLp
+tst  r3			; Loop until mantissa has '1' in top bit
+bmi  fnFloatNormalised
+clc			; Will already be clear from TST
+rol  r1			; Rotate rounding bits into mantissa
+rol  r4			; Rotate mantissa left to multiply by two
+rol  r3
+dec  r2			; Decrement exponent to divide by two
+tst  r4
+bne  fnFloatNormaliseLp
+tst  r3
+bne  fnFloatNormaliseLp
+tst  r2
+bne  fnFloatNormaliseLp	; Keep looping if not normalised to zero
+tst  r1
+bne  fnFloatNormaliseLp	; Keep looping if not normalised to zero
+bic  #&8000,r0		; Normalised to zero, ensure sign is +0
+.fnFloatNormalised
+bit  #&FF00,r2
+beq  fnFloatNormalOk	; exponent>+128, not too big
+.fnFloatTooBig
+jmp  errTooBig
+.fnFloatNormalOk
+;tst  r1		; Check 33rd bit to see if mantissa needs rounding up
+;bpl  fnFloatNormalNoRound
+;add  #1,r4
+asl  r1			; Add 33rd bit into mantissa to round up
+adc  r4
+adc  r3
+bcc  fnFloatNormalNoRound
+ror  r3			; Mantissa rolled over to 00000000, so denormalise back down
+ror  r4
+inc  r2
+clr  r1
+br   fnFloatNormalised	; Check exponent still in range
+.fnFloatNormalNoRound
+tst  r0			; Check what sign of result is
+bmi  fnAddFloat4	; Sign is negative, leave it negative
+bic  #&8000,r3		; Make mantissa positive
+.fnAddFloat4
+tstb r0			; Check operator token
+bpl  fnCompareDone	; b7=0, jump to return result of comparison
+tst  r2			; Set flags from result
+rts  pc
+
+
+; Convert subtraction and operator token into comparison result
+; -------------------------------------------------------------
+; r0       = operator token, 79-7E for <=,<>,>=,<,=,>
+; r2/r3/r4 = subtraction result
+.fnCompareDoneR1
+mov  r1,-(sp)		; Stack return address
+.fnCompareDone
+bic  #&FF00,r0		; Remove saved flags from r0
+tst  r2			; Set flags for SGN
+jsr  pc,fnSGN1		; Convert to -1,0,+1
+.fnCompareDoneR4
+tst  r4
+beq  fnCmpEQ		; <lhs> = <rhs>
+bmi  fnCmpNeg		; <lhs> < <rhs>
+			; <lhs> > <rhs>
+cmp  r0,#&79
+beq  fnCmpFALSE		; <lhs> > <rhs>, test is <=
+cmp  r0,#&7C
+bcs  fnCmpTRUE		; <lhs> > <rhs>, test is <>, >=
+cmp  r0,#&7E
+beq  fnCmpTRUE		; <lhs> > <rhs>, test is >
+br   fnCmpFALSE		; <lhs> > <rhs>, test is <, =
+.fnCmpNeg
+cmp  r0,#&7B
+bcs  fnCmpTRUE		; <lhs> < <rhs>, test is <=, <>
+cmp  r0,#&7C
+beq  fnCmpTRUE		; <lhs> < <rhs>, test is <
+br   fnCmpFALSE		; <lhs> < <rhs>, test is >=, =, >
+.fnCmpEQ
+bit  #1,r0
+bne  fnCmpTRUE		; <lhs> = <rhs>, test is <=, >=, =
+			; <lhs> = <rhs>, test is <>, <, >
+.fnCmpFALSE
+jmp  fnFALSE
+.fnCmpTRUE
+jmp  fnTRUE
+
+
+; Prepare floating values for multiply/divide
+; -------------------------------------------
+.fnFloatPrepare
+mov  r2,4(sp)		; Overwrite stacked exponent with result
+mov  8(sp),r0		; r0=mantissa sign
+mov  r3,r1		; r1=register sign
+xor  r0,r1		; r1=sign of result
+.fnFloatMantissa
+bis  #&8000,r3		; Insert top bit of LHS mantissa
+bis  #&8000,8(sp)	; Insert top bit of RHS mantissa
+rts  pc
+
+
+; Multiplication - <number> * <number>
+; ====================================
+; On entry, r2/r3/r4 = RHS value
+;           sp=>retaddr, r2/r4/r3 = LHS value
+.fnMultiply
+tst  r2
+bne  fnMultiplyFloat	; Jump with   <number> * <float>
+			; We now have <number> * <integer>
+tst  2(sp)
+bne  fnMultiplyFloat1	; Jump with    <float> * <integer>
+
+; Integer multiplication - <integer> * <integer>
+; ----------------------------------------------
+; Shame this code can't be merged with MultFloat. It is almost identical.
+;
+bis  r2,r3
+bis  r2,r4
+beq  fnMultiplyZero	; <int> * 0 -> 0
+#ifdef NOMUL
+mov  r5,-(sp)		; Save program pointer
+mov  r4,-(sp)
+mov  r3,-(sp)		; Save RHS in case of overflow
+mov  10(sp),r2		; r2=b0-b15 of LHS
+mov  12(sp),r5		; r5=b16-b31 of LHS
+mov  r4,r0		; r0=b0-b15 of RHS
+mov  r3,r1		; r3=b16-b31 of RHS
+clr  r3
+clr  r4			; Initial total=0
+mov  #32,-(sp)		; 32 bits to shift and add
+;
+.fnMultiplyLp
+ror  r5			; Rotate LHS through carry
+ror  r2
+bcc  fnMultNoAdd	; No carry, no add needed
+add  r0,r4		; total=total+RHS
+adc  r3
+add  r1,r3
+bmi  fnMultiplyOverflow	; Too big for 31-bit integer
+.fnMultNoAdd
+rol  r0			; Rotate LHS
+rol  r1
+dec  (sp)		; Decrement counter
+bne  fnMultiplyLp	; Loop for all bits
+add  #6,sp		; Pop counter and RHS from stack
+mov  (sp)+,r5		; Restore line pointer
+;
+#else
+;           r3    r4
+;         6(sp) 4(sp) x
+;         -----------
+;
+;          aaaa bbbb
+;          cccc dddd x
+;          ---------
+;          ( b * d )
+;      ( a * d ) 0
+;      ( b * c ) 0
+;  ( a * c ) 0   0   +
+;  -----------------
+;
+;   r3=aaaa, r4=bbbb
+;   sp=>retaddr, exp, dddd, cccc
+
+#ifdef MUL16
+; Fast multiply only of 16-bit integers
+;
+mov  r3,r2		; r2=aaaa
+bis  6(sp),r2		; aaaa>0 or cccc>0, not 16-bit inputs
+bne  fnMultiplyBigInts	; Likely to be too big for 32-bit result
+mov  r4,r0		; r0=bbbb
+bmi  fnMultiplyBigInts	; Likely to overflow into bit 31
+			; We now have a maximum of &FFFF*&7FFF = &7FFF8001
+mul  4(sp),r0		; r0:r1=bbbb * dddd
+			; a=0 and c=0, so a*d=0 and b*c=0
+			; So r0:r1 is the result.
+bmi  fnMultiplyBigInts	; Has become negative, should be positive
+mov  r1,r4
+mov  r0,r3
+;
+#else
+;
+mov  r3,r0
+bic  6(sp),r0		; r0=a AND a
+bne  fnMultiplyBigInts	; a*c>0, more than 32 bits
+mov  r3,r0		; r0=a
+mul  4(sp),r0		; r0:r1=a*d
+bcs  fnMultiplyBigInts
+mov  r1,r2		; r2=a*d
+mov  r4,r0		; r0=b
+mul  6(sp),r0		; r0:r1=b*c
+bcs  fnMultiplyBigInts
+add  r1,r2		; r2=(a*d)+(b*c)
+bcs  fnMultiplyBigInts
+mov  r4,r0		; r0=b
+mul  4(sp),r0		; r0:r1=b*d
+add  r2,r0
+bcs  fnMultiplyBigInts
+bmi  fnMultiplyBigInts
+mov  r1,r4
+mov  r0,r3
+;
+#endif
+;
+#endif
+;
+.fnMultiplyZero
+mov  (sp)+,r1		; Pop return address
+add  #6,sp		; Pop LHS from stack
+clr  r2			; Type=integer
+jmp  (r1)		; Return via r1
+
+; Result won't fit in integer (or is negative), redo as float
+; -----------------------------------------------------------
+.fnMultiplyOverflow
+#ifdef NOMUL
+tst  (sp)+		; Drop counter
+mov  (sp)+,r3		; Get saved LHS back into registers
+mov  (sp)+,r4
+mov  (sp)+,r5		; Restore line pointer
+#endif
+.fnMultiplyBigInts
+;clr  r2		; Set as integer
+;jsr  pc,EnsureFloat	; Convert registers to float
+;			; (we know we are INT, so can speed this up by skipping tests)
+jsr  pc,IntegerToFloat	; Convert registers to float
+			; Continue into float multiply
+
+; Floating point multiplication
+; -----------------------------
+;			;       stack       registers
+.fnMultiplyFloat	; <integer/float> * <float>
+jsr  pc,SwapStack	;         <float> * <integer/float>
+.fnMultiplyFloat1	;         <float> * <integer> or <f>+<i/f> from above
+jsr  pc,EnsureFloat	;         <float> * <float>
+beq  fnMultiplyZero	; 0*num = 0
+jsr  pc,SwapStackMin	; Get smaller <float> into r2/r3/r4
+tst  r2
+beq  fnMultiplyZero	; num*0 = 0
+;
+; exp=exp1+exp2
+; man=man1*man2
+; then renormalise
+; multiplication done by shifting right and adding
+; See Spectrum and CPC disassemblies
+;
+.fnMultiplyFloat2
+add  2(sp),r2		; Add exponents
+sub  #&7F,r2		; Exponent biased from &80
+;			; Exponent is tested after normalisation as
+;			; exponent may get inc/dec'd back into range
+;			; by normalisation
+jsr  pc,fnFloatPrepare	; Stack exponent, get sign of result, add '1' to mantissas
+mov  r5,-(sp)		; Save program pointer
+mov  r1,-(sp)		; Save sign of result
+mov  8(sp),r2		; r2=b0-b15 of LHS
+mov  10(sp),r5		; r5=b16-b31 of LHS
+mov  r4,r0		; r0=b0-b15 of RHS
+mov  r3,r1		; r3=b16-b31 of RHS
+clr  r3
+clr  r4			; Initial total=0
+mov  #32,-(sp)		; 32 bits to add
+;
+; we now have
+;          r3:r4=running total, starting at zero
+;         (sp)=32, number of bits to add/multiply
+;          r1:r0=RHS mantissa
+;          r5:r2=LHS mantissa
+;          sp=>counter, sign, saved r5, retaddr, exponent, r4, r3 = LHS value
+;
+.fnMultFloatLp
+ror  r5			; Rotate top bit out of LHS
+ror  r2
+bcc  fnMultFloatNoAdd	; Bit not set, no add
+;
+; Does this need the same workaround as AddFloat?
+add  r0,r4		; total=total+RHS
+adc  r3
+bcc  fnMultFloatAddNoCy
+add  r1,r3		; Any carry carried on into total
+sec
+br   fnMultFloatNoAdd
+.fnMultFloatAddNoCy
+add  r1,r3		; Any carry carried on into total
+;
+.fnMultFloatNoAdd
+ror  r3			; Rotate total, taking in any carry
+ror  r4			; This aligns total with next bit to test
+dec  (sp)
+bne  fnMultFloatLp	; Loop for 32 bits
+;mov  #0,r2
+;ror  r2		; r2=rounding bits
+mov  #0,r1
+ror  r1			; r1=rounding bits
+tst (sp)+		; Drop counter
+br  fnDivideFinish
+
+#ifdef NOMUL
+.R2timesR3toR3
+;;; NB! UNIMPLEMENTED - needed for DIM and array lookup
+rts  pc
+#endif
+
+; Division - <number> / <number>
+; ==============================
+; On entry, r2/r3/r4 = RHS value
+;           sp=>retaddr, r2/r4/r3 = LHS value
+;
+#define USEDIVIDE35
+.fnDivide
+jsr  pc,EnsureFloat
+beq  errDivideZero	; RHS=0, num/0 = divide by zero
+jsr  pc,SwapStack
+.fnDivideSwap
+jsr  pc,EnsureFloat
+beq  fnMultiplyZero	; LHS=0, 0/num = 0
+;
+; r2/r3/r4=LHS value
+;    sp=>  RHS value
+;
+; to divide,
+;  exp=expL-expR
+;  man=manL/manR
+;  then renormalise
+;
+sub  2(sp),r2		; Subtract exponents
+add  #&81,r2		; Exponent biased from &80
+;			; Exponent is tested after normalisation as
+;			; exponent may get inc/dec'd back into range
+;			; by normalisation
+jsr  pc,fnFloatPrepare	; Stack exponent, get sign of result, add '1' to mantissas
+mov  r5,-(sp)		; Save program pointer
+mov  r1,-(sp)		; Save sign of result
+;
+#ifdef USEDIVIDE35
+mov  #35,r5		; r5=35, number of bits to divide
+mov  r4,r2		; r0:r2=running total
+mov  r3,r0
+;
+clr r4			; Clear rounding bits
+;clr r3	; not needed
+;clr r1	; not needed
+; we now have, weird order to optimise register usage
+;       r0:r2   =running total initialsed from r3:r4
+;       r1:r3:r4=result rotated into
+;          r5   =35 number of bits to sub/divide
+;          sp=>sign, saved r5, retaddr, exponent, r4, r3 = RHS value
+;
+br fnDivideStart	; Jump into division loop
+.fnDivideFloatLp
+rol  r4			; Rotate carry bit into r1:r3:r4 result
+rol  r3
+rol  r1
+asl  r2			; Rotate dividend
+rol  r0
+bcs  fnDivideSubtract
+.fnDivideStart
+cmp  10(sp),r0
+bcs  fnDivideSubtract	; hi(stk) < hi(reg)
+bne  fnDivideCount	; hi(stk) > hi(reg), with clc
+cmp  8(sp),r2
+bcs  fnDivideSubtract	; lo(stk) < lo(reg)
+bne  fnDivideCount	; lo(stk) > lo(reg), with clc
+.fnDivideSubtract
+sub  8(sp),r2		; total=total-RHS divisor
+sbc  r0
+sub  10(sp),r0
+sec			; sec=did a divide
+.fnDivideCount
+dec  r5
+bne  fnDivideFloatLp	; Loop for all bits
+;
+;		  ;    R1       R3       R4
+		  ; 00000HHH:HHHHHLLL:LLLLLRRR
+mov #3,r5
+asr r1		  ; 000000HH:H:HHHHHLLL:LLLLLRRR
+.fnDivideRound
+ror r3		  ; 000000HH:HHHHHHLL:L:LLLLLRRR
+ror r4		  ; 000000HH:HHHHHHLL:LLLLLLRR:R
+ror r1		  ; R000000H:H:HHHHHHLL:LLLLLLRR
+dec r5
+bne fnDivideRound
+;ror r3		  ; R000000H:HHHHHHHL:L:LLLLLLRR
+;ror r4		  ; R000000H:HHHHHHHL:LLLLLLLR:R
+;ror r1		  ; RR000000:H:HHHHHHHL:LLLLLLLR
+;ror r3		  ; RR000000:HHHHHHHH:L:LLLLLLLR
+;ror r4		  ; RR000000:HHHHHHHH:LLLLLLLL:R
+;ror r1		  ; RRR00000:HHHHHHHH:LLLLLLLL:0
+;
+#else
+;
+mov  #48,r5		; r5=48, number of bits to divide
+mov  r4,r2		; r0:r2=running total
+mov  r3,r0
+clr  r1			; Clear rounding bits
+;clr r4	; not needed
+;clr r3	; not needed
+; we now have, weird order to optimise register usage
+;       r0:r2   =running total initialsed from r3:r4
+;       r3:r4:r1=result rotated into
+;          r5   =number of bits to sub/divide
+;          sp=>sign, saved r5, retaddr, exponent, r4, r3 = RHS value
+;
+br fnDivideStart	; Jump into division loop
+.fnDivideFloatLp
+rol  r1			; Rotate carry bit into r3:r4:r1 result
+rol  r4
+rol  r3
+;.fnDivide34
+asl  r2			; Rotate dividend
+rol  r0
+bcs  fnDivideSubtract
+.fnDivideStart
+cmp  10(sp),r0
+bcs  fnDivideSubtract	; hi(stk) < hi(reg)
+bne  fnDivideCount	; hi(stk) > hi(reg), with clc
+cmp  8(sp),r2
+bcs  fnDivideSubtract	; lo(stk) < lo(reg)
+bne  fnDivideCount	; lo(stk) > lo(reg), with clc
+.fnDivideSubtract
+sub  8(sp),r2		; total=total-RHS divisor
+sbc  r0
+sub  10(sp),r0
+sec			; sec=did a divide
+.fnDivideCount
+dec  r5
+bne  fnDivideFloatLp	; Loop for all bits
+#endif
+;
+;#ifdef DEBUG
+;jsr pc,Debug_DumpRegsHex
+;#endif
+;
+; We now have
+;  r3:r4:r1=mantissa, r1=rounding bits
+; We also need
+;  r0      =<sign of result><operator>
+;  r2      =exponent
+;  r5      =program pointer
+;  (sp)    =return address
+;
+.fnDivideFinish
+mov  (sp)+,r0		; Get sign of result
+mov  (sp)+,r5		; Restore program pointer
+mov  (sp)+,r2		; r2=return address
+mov  r2,4(sp)		; Store further up stack
+			; r1=rounding bits
+mov  (sp)+,r2		; r2=exponent of result
+tst  (sp)+		; Drop part of RHS from stack
+bis  #&80,r0		; Set <not compare>
+jmp  fnFloatNormaliseDiv; Jump to normalise and insert sign bit
+
+.errDivideZero
+jsr  pc,Error
+equb 18,"Division by zero",0
+align
+
+; Integer division - <number> DIV <number>
+; Integer modulus  - <number> MOD <number>
+; ========================================
+; On entry, r2/r3/r4 = RHS value
+;           sp=>retaddr, r2/r4/r3 = LHS value
+;           r0=tknDIV or tknMOD
+; sign of DIV result is LHS xor RHS
+; sign of MOD result is LHS
+;
+.fnDIV
+.fnMOD
+jsr  pc,EnsureInteger	; Ensure RHS is integer
+mov  r4,r1
+bis  r3,r1
+beq  errDivideZero	; RHS=0 (slightly faster)
+cmpb r0,#tknMOD
+beq  fnDIV2a		; If MOD, result sign ignores RHS sign
+mov  r3,r1		; r0=sign
+bic  #&7FFF,r1		; Keep just sign bit
+xor  r1,r0		; r0=<sign><token>
+.fnDIV2a
+jsr  pc,fnABSint	; Ensure positive
+mov  r0,r2		; Store token in 'exp' register
+jsr  pc,SwapStack	; Get LHS into registers
+jsr  pc,EnsureInteger	; Ensure LHS is integer
+mov  r4,r1
+bis  r3,r1
+bne  fnDIV3		; LHS<>0
+jmp  fnMultiplyZero	; LHS=0, 0/num = 0
+.fnDIV3
+mov  r3,r1		; r0=sign
+bic  #&7FFF,r1		; Keep just sign bit
+xor  r1,2(sp)		; exp=<sign><token>
+jsr  pc,fnABSint	; Ensure positive
+
+; sp=>retaddr, sign:tkn, r4, r3 RHS
+; 6(sp):4(sp)= RHS             Z80 D
+;    r0:r1   = remainder       Z80 A
+;    r2=32   = bit counter     Z80 B
+;    r3:r4   = LHS and result  Z80 C
+;			; Zaks, C=C DIV D, A=C MOD D
+mov #32,r2		; LD  B,8   - bit counter
+clr r1			; XOR A     - remainder
+clr r0
+.fnDIVlp
+clc
+rol r4			; SLA C     - rotate a bit out of LHS
+rol r3
+rol r1			; RLA       - rotate the bit into remainder
+rol r0
+cmp r0,6(sp)		; CP D b16-b31
+beq fnDIVagain
+bcs fnDIVnoAdd
+bcc fnDIVAdd
+.fnDIVagain
+cmp r1,4(sp)		; CP D b0-b15
+bcs fnDIVnoAdd		; JR C,noadd
+.fnDIVAdd
+add #1,r4		; INC C
+adc r3
+sub 4(sp),r1		; SUB D
+sbc r0
+sub 6(sp),r0
+.fnDIVnoAdd
+dec r2			; DJNZ loop - loop for each bit
+bne fnDIVlp
+mov  2(sp),r2		; Get DIV/MOD token
+bic  #&8000,r2
+cmpb r2,#tknDIV
+beq  fnDIVsign		; DIV, use DIV result
+mov  r1,r4		; MOD, get MOD result
+mov  r0,r3
+.fnDIVsign
+mov  2(sp),r2		; Get DIV/MOD token
+bpl  fnDIVdone
+jsr  pc,NegateInteger
+.fnDIVdone
+mov  (sp)+,r1		; Pop return address
+add  #6,sp		; Drop RHS from stack
+clr  r2			; Type=integer
+jmp  (r1)		; Return via r1
+
+
+; Numeric functions
+; ~~~~~~~~~~~~~~~~~
+
+.fnVAL
+jsr pc,EvalStrValCR
+.fnVAL1
+mov r5,-(sp)		; Save program pointer
+mov r4,r5		; Point to string
+jsr pc,EvalDecimalVAL
+mov (sp)+,r5		; Restore program pointer
+tst r2			; Set flags
+rts pc
+
+.fnEVAL
+jsr pc,EvalStrValCR	; Evaluate string and copy to string buffer with <cr> terminator
+mov r5,-(sp)		; Save program pointer
+mov r4,r5		; r5=>source string
+adr SV_STRING,r4	; r4=>destination in string buffer
+;jsr pc,TokeniseStrip	; Tokenise the string
+jsr pc,TokeniseEVAL	; Tokenise the string
+; R4=>start of tokenised line
+; R3= length of tokenised line excluding <cr>
+inc r3			; Add <cr> to length of string
+mov #&8000,r2		; r2= type=string
+jsr pc,StackStringAndOp	; Copy string to stack to evaluate it there
+mov sp,r5
+add #4,r5		; r5=>stacked string
+jsr pc,Evaluate		; Call full evaluator
+mov r3,r1		; Move result to protect from DropString
+mov r2,r0
+jsr pc,UnstackDropStringOp ; Drop string from stack
+mov (sp)+,r5		; Restore program pointer
+mov r1,r3
+mov r0,r2		; Get result back, setting flags
+rts pc
+
+.fnSGN
+jsr pc,EvalNumVal
+.fnSGN1
+bne fnSGN2		; Jump if float
+tst r3
+bne fnSGN2		; Integer<>&00xx, test sign
+tst r4
+beq fnFALSE		; Integer=0, jump to return 0
+.fnSGN2
+tst r3			; b15=integer b31 or float sign bit
+bmi fnTRUE		; <0 - return -1
+mov #1,r4		; >0 - return 1
+br fn16bit
+
+
+; Simple power to integer exponent
+; --------------------------------
+; Only does positive powers
+; lhs^neg treated as lhs^verybig, will give Too big
+;
+.fnPower
+jsr  pc,EnsureInteger	; exp    ret, num
+clr  r3
+tst  r4
+bne  fnPower1		; exp>0
+mov  #1,r4		; num^0 = 1
+br   fnPowerDone1
+.fnPower1
+jsr  pc,SwapStack	; num    ret, exp
+mov  r3,-(sp)
+mov  r4,-(sp)
+mov  r2,-(sp)		; num    num, ret, exp
+.fnPowerLp
+dec  10(sp)		; num    num, ret, exp-1
+beq  fnPowerDone
+mov  4(sp),-(sp)
+mov  4(sp),-(sp)
+mov  4(sp),-(sp)	; num    num, num, ret, exp-1
+jsr  pc,fnMultiply	; num^2  num, ret, exp-1
+br   fnPowerLp
+.fnPowerDone		; num^e  num, ret, 0
+add  #6,sp		; Drop num
+.fnPowerDone1
+mov  (sp)+,r1		; r1=return address
+add  #6,sp		; Drop exp
+tst  r2			; Set flags
+jmp (r1)		; Return via r1
+
+
+; Simple 32-bit integer square root
+; ---------------------------------
+; SQR(<0) returns zero
+.fnSQR
+jsr pc,EvalIntVal
+mov #-1,r2              ; Initial root will be 0*2+1 after adding 1 to it
+.fnSQRlp
+inc r2                  ; Step to next root, next odd number is 2*r2+1
+sub r2,r4               ; r3:r4=r3:r4-r2
+sbc r3
+sub r2,r4               ; r3:r4=r3:r4-(2*r2)
+sbc r3
+sub #1,r4               ; r3:r4=r3:r4-(2*r2+1)
+sbc r3
+bpl fnSQRlp             ; Loop to subtract next odd number
+mov r2,r4               ; Move result into b0-b15
+br  fn16bit             ; Return 16-bit integer
+
+
+; Program environment functions
+; =============================
+.fnLineNum
+movb (r5)+,r0
+asl r0
+asl r0
+mov r0,r3
+bic #&3F,r3
+movb (r5)+,r1
+xor r1,r3
+asl r0
+asl r0
+bic #&3F,r0
+movb (r5)+,r4
+xor r0,r4
+swab r4
+bic #&FF00,r3
+bic #&00FF,r4
+bis r3,r4
+clr r3
+clr r2
+rts pc
+
+.fnPAGE
+mov SV_PAGE,r4
+br  fn16bit
+
+.fnTO
+cmpb (r5)+,#ASC"P"
+beq  fnTOP
+.jmpNoSuchVar2
+jmp errNoSuchVar
+.fnTOP
+mov  SV_TOP,r4
+br   fn16bit
+
+.fnLOMEM
+mov SV_LOMEM,r4
+br  fn16bit
+
+.fnEND
+mov SV_VAREND,r4
+br  fn16bit
+
+.fnHIMEM
+mov SV_HIMEM,r4
+br  fn16bit
+
+.fnERL
+mov SV_ERL,r4
+br  fn16bit
+
+.fnERR
+movb SV_ERR,r4
+br  fn8bit
+
+.fnCOUNT
+movb SV_COUNT,r4
+.fn8bit
+bic #&FF00,r4
+br  fn16bit
+
+#ifndef NOEXTRAFN
+ .fnWIDTH
+ movb SV_WIDTH,r4
+ br  fn8bit
+
+ .fnQUIT
+ cmpb (r5)+,#tknQUIT
+ bne  jmpNoSuchVar2
+ tstb SV_SYS
+ bmi  fnTRUE
+#endif
+
+.fnFALSE
+clr r4
+.fn16bit
+clr r3
+clr r2			; Set type=integer and set flags
+rts pc
+
+; These are here to be near their branch destinations
+; ---------------------------------------------------
+.fnASC
+jsr  pc,EvalStrVal
+movb (r4),r4		; Get first byte
+tst  r3			; Null string?
+bne  fn8bit		; Return character
+
+.fnTRUE
+mov #&FFFF,r4
+mov r4,r3
+clr r2
+rts pc
+
+.fnLEN
+jsr  pc,EvalStrVal
+mov  r3,r4		; Move length to value
+br   fn16bit
+
+
+; Logical/bitwise operations
+; ==========================
+.fnOR
+mov (sp)+,r1		; Pop return address
+tst (sp)+		; Drop exponent
+bis (sp)+,r4
+bis (sp)+,r3
+tst r2
+jmp (r1)		; Return via r1
+
+.fnEOR
+mov (sp)+,r1		; Pop return address
+tst (sp)+		; Drop exponent
+xor r4,(sp)
+mov (sp)+,r4
+xor r3,(sp)
+mov (sp)+,r3
+tst r2
+jmp (r1)		; Return via r1
+
+.fnAND
+mov (sp)+,r1		; Pop return address
+tst (sp)+		; Drop exponent
+com (sp)
+bic (sp)+,r4
+com (sp)
+bic (sp)+,r3
+tst r2
+jmp (r1)		; Return via r1
+
+.fnNOT
+jsr pc,EvalIntVal
+com r4
+com r3
+tst r2			; Set flags
+rts pc
+
+
+; Random Number functions
+; =======================
+; =RND     - return random integer 0..FFFFFFFF
+; =RND(<0) - initialise seed, return n
+; =RND(0)  - return last RND(1) value
+; =RND(1)  - random real 0..1
+; =RND(>1) - random integer 1..n
+;
+.fnRND
+cmpb (r5),#ASC"("
+beq fnRNDnum		; Jump to do RND(n)
+			; Drop through with R2=0 to return integer
+;
+; =RND - update seed, return seed as type in R2
+; ---------------------------------------------
+.fnRNDupdate
+mov #&20,r3
+.fnRNDlp
+movb SV_RAND+2,r0
+asrb r0
+asrb r0
+asrb r0
+movb SV_RAND+4,r1
+xor  r1,r0
+rorb r0
+rol  SV_RAND+0
+rol  SV_RAND+2
+rolb SV_RAND+4
+dec  r3
+bne  fnRNDlp
+;
+; Return current seed, type in R2
+; -------------------------------
+.fnRNDreturn
+mov  SV_RAND+0,r4
+mov  SV_RAND+2,r3
+tst  r2
+beq  fnRNDdone
+bic  #&8000,r3		; Force to be positive
+mov  r3,-(sp)
+mov  r4,-(sp)
+mov  r2,-(sp)		; Stack result
+jsr  pc,fnTRUE		; Prepare to subtract 1
+mov  r3,r0		; R0.b7=1 to indicate 'not compare'
+jsr  pc,fnSubtract	; Change result from 1..2 to 0..1
+rts  pc
+;
+; =RND(n)
+; -------
+.fnRNDnum
+;jsr pc,EvalInteger1	; Step past bracket, evaluate integer
+;jsr pc,CheckClose
+jsr pc,EvalBracket1	; Evaluate expression inside brackets
+mov r3,r0
+bmi fnRNDminus		; RND(<0) - set seed
+mov #&80,r2		; Prepare for real return value between 1 and 2
+bis r4,r0
+beq fnRNDreturn		; RND(0) - return current seed as a real
+tst r3
+bne fnRNDplus		; RND(>65535), do RND(>1)
+cmp r4,#1
+beq fnRNDupdate		; RND(1) - jump to update seed and return as real
+;
+; =RND(>1) - update seed, use as real, multiply by n, return n as 32-bit int
+; --------------------------------------------------------------------------
+.fnRNDplus
+mov r3,-(sp)
+mov r4,-(sp)
+clr -(sp)		; stack n as an integer
+jsr pc,fnRNDupdate	; Get next seed as a real, R2 set to &7F earlier
+jsr pc,fnMultiply	; Multiply real seed by stacked integer
+jsr pc,EnsureInteger
+inc r4			; Increment result to give 1..n
+bne fnRNDdone
+inc r3
+br  fnRNDdone
+;
+; =RND(<0) - set seed, return n
+; -----------------------------
+.fnRNDminus
+mov r4,SV_RAND+0
+mov r3,SV_RAND+2
+clr SV_RAND+4
+.fnRNDdone
+clr r2			; R2=INTEGER, set flags
+rts pc
+
+
+; Calling machine code
+; ====================
+.cmdCALL
+jsr  pc,EvalInteger
+cmpb r0,#ASC","
+bne  fnUSRgo		; CALL addr
+;
+; CALL addr,parameters
+mov  r4,r2		; r2=call address
+clr  r1			; Zero number of parameters
+.cmdCALLlp
+inc  r1			; Inc. number of parameters
+mov  r1,-(sp)		; Stack number of parameters
+mov  r2,-(sp)		; Stack call address
+;inc  r5		; Step past comma
+;jsr  pc,SkipSpaceThis ; Step past any spaces
+jsr  pc,FetchNextChar
+jsr  pc,VarFindCreate	; Find address of parameter, create if nonexistant
+;bcs  errSyntax		; Not a valid variable - done in VarFindCreate
+mov  (sp)+,r2		; Get call address off stack
+mov  (sp)+,r1		; Get number of parameters off stack
+mov  r4,-(sp)		; Stack parameter address
+mov  r3,-(sp)		; Stack parameter type/size
+movb (r5),r0		; Get next character
+cmpb r0,#ASC","
+beq  cmdCALLlp		; Loop back if another parameter present
+mov  r1,-(sp)		; Stack number of parameters
+mov  r5,-(sp)		; Save program pointer
+;
+; r2=call address, sp=>num, type,addr, type,addr, etc.
+mov  r2,r4		; r4=call address
+;;mov  SV_VARS+4,r0	; r0=A%
+;;jsr  pc,CallCodeRaw	; Set up registers, call code
+jsr  pc,CallCode
+;br   cmdCallDone
+;equw SV_VARS		; (sp) points to list of useful addresses
+;equw 0
+;.cmdCallDone
+mov  (sp)+,r5		; Restore program pointer
+mov  (sp)+,r0		; Get number of parameters off stack
+add  r0,r0
+add  r0,r0		; 4 bytes per parameter
+add  r0,sp		; Drop parameters from stack
+rts  pc			; Return
+;
+.fnUSR
+jsr pc,EvalIntVal
+.fnUSRgo
+mov r5,-(sp)		; Save program pointer
+jsr pc,CallCode		; Call address at R4
+mov (sp)+,r5		; Restore program pointer
+mov r0,r4		; Move result to accumulator
+mov r1,r3
+clr r2			; Result is an integer
+rts pc
+
+.CallCode
+mov SV_VARS+4,r0	; r0=A%
+;;tst r3
+;;bne CallCodeRaw	; dest>&FFFF
+cmp r4,#&FFC0
+bcc CallCodeMOS		; dest>&FF00, dest<&10000
+.CallCodeRaw
+mov r4,-(sp)		; Stack destination address
+mov SV_VARS+8,r1	; r1=B%
+mov SV_VARS+12,r2	; r2=C%
+mov SV_VARS+16,r3	; r3=D%
+mov SV_VARS+20,r4	; r4=E%
+mov SV_VARS+24,r5	; r5=F%
+rts pc			; Jump to destination
+
+.CallCodeMOS
+jsr  pc,CallMOS
+; r0->b0-b7
+; r1->b8-b15
+; r2->b16-b23
+; Cy->b24
+bic  #&FF00,r2		; R2 result Carry unchanged
+bcc  CallCodeMOS2	; *CHECK* Does BIC clear carry?
+bis  #&0100,r2		; R2.b8=Carry
+.CallCodeMOS2
+swab r1			; Carry cleared
+bic  #&00FF,r1		; R1 b15-b8=result R1 b7-b0
+bic  #&FF00,r0		; R0  b7-b0=result R0 b7-b0
+bis  r1,r0		; b15-b8=result from R1, b7-b0=result from R0
+mov  r2,r1		; b23-b16=result from R2, b24=Carry
+rts  pc
+
+.CallMOS
+mov  SV_VARS+96,r1	; r1=X%
+mov  SV_VARS+100,r2	; r2=Y%
+mov  r2,r5		; r5=Y% for OSARGS
+cmp  r1,#256
+bcc  CallMOS2		; X%>255, use as is
+swab r2
+bis  r2,r1		; r1=X%+256*Y%
+swab r2
+.CallMOS2
+sub  #&FFCE,r4		; R4=offset from MOS jump block
+add  r4,r4		; Double offset to 2 bytes per address, 6 bytes per entry
+adr  MOSJumpBlock,r3	; Point to MOS jump block
+add  r3,r4		; Point to emulated entry point
+jmp  (r4)		; Jump to entry point
+
+; addr-&CE *2 space   
+; FFCE  0   0   6  OSFIND
+; FFD1  3   6   6  OSGBPB
+; FFD4  6  12   6  OSBPUT
+; FFD7  9  18   6  OSBGET
+; FFDA 12  24   6  OSARGS
+; FFDD 15  30   6  OSFILE
+; FFE0 18  36   6  OSRDCH
+; FFE3 21  42   6  OSASCI
+; FFE7 25  50   6  OSNEWL
+; FFEC 30  60   4  OSWRCR
+; FFEE 32  64   6  OSWRCH
+; FFF1 35  70   6  OSWORD
+; FFF4 38  76   6  OSBYTE
+; FFF7 41  82   .  OSCLI
+
+.MOSJumpBlock
+JMP IO_FIND	; CE CF - r0=A%, r1=X%+256*Y%=>string
+rts pc		; D0
+JMP IO_GBPB	; D1 D2 - r0=A%, r1=X%+256*Y%=>block  
+rts pc		; D3
+MOV R2,R1	; D4    -        r1=Y%=handle
+JMP IO_BPUT	; D5 D6 - r0=A%, r1=Y%=handle
+MOV R2,R1	; D7    -        r1=Y%=handle
+JMP IO_BGET	; D8 D9 - r0=A%, r1=Y%=handle
+		; DA    - r0=A%, r1=X%, r2=Y%, r5=Y%
+MOV R1,R2	; DA    - r0=A%, r1=X%, r2=X%
+MOV R5,R1	; DB    - r0=A%, r1=Y%, r2=X%
+br _ffda	; DC
+JMP IO_FILE	; DD DE - r0=A%, r1=X%+256*Y%=>block
+rts pc		; DF
+JMP IO_RDCH	; E0 E1 - entry values ignored        
+rts pc		; E2
+JMP IO_ASCI	; E3 E4 - r0=A%                       
+rts pc		; E5
+rts pc		; E6
+JMP IO_NEWL	; E7 E8 - entry values ignored        
+rts pc		; E9
+._ffda		; Squeeze in here
+JMP IO_ARGS	; EA EB - r0=A%, r1=Y%, r2=X%
+JMP IO_WRCR	; EC ED - entry values ignored        
+JMP IO_WRCH	; EE EF - r0=A%                       
+rts pc		; F0
+JMP IO_WORD	; F1 F2 - r0=A%, r1=X%+256*Y%=>block  
+rts pc		; F3
+JMP IO_BYTE	; F4 F5 - r0=A%, r1=X%, r2=Y%         
+rts pc		; F6
+MOV R1,R0	; F7    - r0=X%+256*Y%=>string        
+JMP IO_CLI	; F8 F9 - r0=>string                  
+
+;._ffda
+;MOV SV_VARS+100,R1
+;JMP IO_ARGS	; r0=A%, r1=Y%, r2=X%
+

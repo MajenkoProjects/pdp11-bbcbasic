@@ -1,0 +1,187 @@
+                         BBC BASIC for the PDP11
+                         =======================
+                           Implementation Notes
+                            Date:  10-May-2025
+
+This is a PDP11 implementation of the BBC BASIC programming language. It
+implements BBC BASIC IV, with a few additions from BBC BASIC V. It requires
+a PDP11 with the MUL, XOR and SXT instructions, such as PDP11/23 or better.
+
+BASIC V extensions
+------------------
+The following extensions are implemented:
+   =END             =GET$#chn        =MODE            =QUIT
+   =REPORT$         =VDU n           =^variable       BPUT#chn,s$[;]
+   %binary          &oOctal          @Octal           ERROR [EXT] n,s$
+   =STR$=           =STR$/           COLOUR l,p       COLOUR l,r,g,b   
+   OFF              ON               SOUND OFF        SOUND ON
+   GCOL c           PLOT x,y         QUIT [n]         RUN s$
+                    
+Implementation notes, v0.45
+---------------------------
+The following are not yet implemented:
+* Negative and non-integer exponents (eg A=2E-4 and A=3^2.5)
+* All Trig/Log: SIN COS TAN ASN ACS ATN DEG RAD EXP LOG LN real^ realSQR
+* @% is ignored when converting numbers to string, float conversion is fixed
+  at &000009xx, that is General to 9 significant figures, integer is fixed
+  at &00000Axx, that is General to 10 digits.
+* Real numbers larger than 999999999 do not print correctly.
+
+LOCAL ERROR/DATA cannot be used inside FOR/NEXT or REPEAT/UNTIL loops. It
+can only be used within PROC/FN immediately after any LOCAL variables. INPUT
+acts the same as INPUT LINE.
+
+The binary image ends with a &0000 word. An embedded BASIC program can be
+appended to the binary image by replacing the &0000 word with the length of
+the BASIC program, appending the empty workspace and the BASIC program to
+the end of the image, and setting the "Initialised Data" word in the Unix
+header to the size of the whole image including the BASIC program. This is
+currently not implemented on RSTS/RT11.
+
+
+                       Platform-Specific Information
+                       =============================
+All platform-specific operations are passed to a Host module. This can be
+rewritten to target any other platform without touching the interpreter
+itself.
+
+PDP11 Unix
+----------
+When running on PDP11 Unix:
+* OSBYTE 0,1 returns X=8, indicating filenames are '/directory/file.ext'.
+* INKEY-256 returns &Bx to indicate a PDP11, with:
+    &B4 for Unix v4    &B5 for Unix v5    &B6 for Unix v6
+    &B7 for Unix v7    &B9 for BSD2.9     &BB for BSD2.11
+* When using a Unix filing system OSARGS 0,0 returns 24.
+
+The 'ansi' tool translates BBC VDU sequences to ANSI text positioning and
+colour codes, so running 'bbcbasic | ansi' will allow ANSI text control
+where supported. To support a graphics display a similar piped output tool
+can be used.
+
+Unix before version 7 does not return information from the seek() call, so
+consequently, reading PTR, EXT and EOF do not work from BASIC.
+
+Currently the BSD2.9 keyboard queue is not detected, so function/editing
+keys are not correctly returned.
+
+PDP11 RT11/RSTS
+---------------
+When running on RSTS/RT11/UKNC:
+* INKEY-256 returns &B0 for "Generic PDP11" or &B1 for UKNC.
+* OSBYTE 0,1 returns &2B to indicate 'd:fname.ext' filenames.
+
+The RT11 HostIO interface includes a driver for ANSI text positioning and
+colour supports the VT52, VT100 and UKNC/Electronica.
+
+The RT11/RSTS OS interface currently only implements:
+* LOAD, SAVE, CHAIN              - implemented
+* OPENIN, OPENOUT, OPENUP, CLOSE - implemented
+* BGET, BPUT, GBPB               - not yet implemented
+* PTR, EXT, EOF                  - not yet implemented
+* The only OSCLI/*command currently implemented is '*.'
+
+VDU implementation
+------------------
+With BBC BASIC, VDU commands are send straight to the host's VDU driver. On
+RT11/RSTS, or on Unix piping output through 'ansi', VDU control codes are
+translated to the appropriate ANSI sequences to select text positioning and
+colours. A lot of testing and experimentation has been done to work out the
+best translation of VDU code to native control sequences to get as close an
+implementation as possible.
+
+VDU 0   - Null        VDU 12   - CLS                      VDU 24
+VDU 1,n - Raw output  VDU 13   - Carriage return          VDU 25
+VDU 2                 VDU 14                              VDU 26
+VDU 3                 VDU 15                              VDU 27
+VDU 4                 VDU 16                              VDU 28
+VDU 5                 VDU 17,n - COLOUR n                 VDU 29
+VDU 6                 VDU 18                              VDU 30     - HOME
+VDU 7   - BELL        VDU 19                              VDU 31,x,y - TAB(x,y)
+VDU 8   - LEFT        VDU 20   - Select default colours   VDU 127    - DELETE
+VDU 9   - RIGHT       VDU 21
+VDU 10  - DOWN        VDU 22,n - MODE n
+VDU 11  - UP          VDU 23
+
+Where supported:
+    COLOUR &00+n sets the text foreground colour
+    COLOUR &40+n sets any extension colour
+    COLOUR &80+n sets the text background colour
+    COLOUR &C0+n sets the border colour
+Colour numbers are the standard %LxxFIBGR.
+
+VDU 1,n sends the character n directly to the host's TTYOUT output, bypassing
+any VDU driver. VDU 27 can be used to introduce a host CSI sequence.
+
+UKNC VDU driver
+~~~~~~~~~~~~~~~
+MODE n selects a 80x24, 40x24 or 20x24 screen mode:
+       0: 80x24      3: 80x24      6: 40x24
+       1: 40x24      4: 40x24      7: 40x24
+       2: 20x24      5: 20x24
+The UKNC has 8 colours in every screen mode.
+COLOUR &40+n sets the cursor colour.
+VDU 14 selects Cyrillic characters, VDU 15 selects Latin characters.
+
+Top-bit-set characters are sent directly to CONOUT bypassing the 7-bit filter
+on TTYOUT, allowing the full character set and top-bit CSI sequences to be
+used, eg VDU 27,164 to turn underline on.
+
+Keyboard input
+--------------
+The keyboard mapping is that indicated by the Host OS value returned by
+OSBYTE 0,1 and INKEY-256.
+* For Hosts OS 0-7 it is the RISC OS "semi-regular" mapping:
+    function keys f0-f9 are &80-&89
+    function keys f10-f12 are &CA-&CC
+    editing keys are &8B-&8F for Copy,Left,Right,Down,Up
+* For other hosts it is the "regular" mapping:
+    function keys are &80-&8F for f0 to f15
+    editing keys are &C6-&CF for Ins,Del,Home,End,PgDn,PgUp,Left,Right,Down,Up
+* Shift and Ctrl modify the top-bit keycodes by XORing with &10 and &20.
+
+Where supported by the hardware/operating system:
+* EOF#0 returns FALSE if there are keypresses pending.
+* ADVAL(-1) will return non-zero if there are entries in the keyboard buffer.
+* ADVAL(127) will wait for and return a 16-bit keypress.
+* INKEY(&8000+n) will wait up to n centiseconds and return a 16-bit keypress.
+
+16-bit keypresses return &100+n for function and editing keys.
+
+Escape processing
+-----------------
+Testing for the Escape key can be disabled with *ESC OFF and enabled with
+*ESC ON. Only Unix v7 allows the Escape key to be tested in the background.
+On Unix v6, Unix v5 and RT11 the Escape key has to be polled in the
+foreground. To avoid slowing the interpreter excessively, this polling is
+only done once every 256 tests. Testing has shown this slows the interpreter
+down about 1%-2% compared to never checking for Escape. LIST checks for
+Escape at the end of every displayed line.
+
+Porting to other platforms
+--------------------------
+PDP11 BBC BASIC will run on any PDP11 platform. The interpreter communicates
+with the platform it is running on via a platform-dependant Host module. BBC
+BASIC can be ported to another platform by simply writing an appropriate
+IOHost module and, if neccessary, a target-specific header. See the existing
+UnixIO, TubeIO and RT11IO modules and headers as a starting point.
+
+PDP11 CPU Requirements
+----------------------
+PDP11 BBC BASIC requires the PDP11 instructions: XOR, MUL, SXT, so this
+requires a PDP11/23 or better. The Unix version of BASIC is written to run
+on a minimum of PDP11 Unix Version 4, as it needs the indir() and signal()
+system calls.
+
+Machine code interface
+----------------------
+MOS calls to &FFxx are translated to the correct EMT or TRAP calls for the
+host being run on. There is currently no built-in way to directly make EMT
+or SYS calls, but you can do so by manually building a bit of code in memory
+and calling it. For example, to call EMT 0 (OSQUIT) you could do:
+
+    !END=&878800:CALL END
+
+This pokes EMT 0:RTS PC into memory just above the heap, then calls it. As
+long as you do not create any new variables or strings between poking and
+reading, data poked at END is unchanged between statements.
