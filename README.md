@@ -16,6 +16,6 @@ Running under RT11 5.4 it was found that the `TIME` variable
 was ticking around 60 million times too fast. Experiments
 showed that it was likely the words of the result being swapped.
 Patching BASIC to return the words in the opposite order 
-(https://github.com/MajenkoProjects/pdp11-bbcbasic/commit/1691d98c82ee79d97af0d3e298ff0eebfdac6989)
+([1691d98](https://github.com/MajenkoProjects/pdp11-bbcbasic/commit/1691d98c82ee79d97af0d3e298ff0eebfdac6989))
 fixed the problem and TIME now ticks at the expected centisecond
 rate
