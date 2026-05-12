@@ -414,8 +414,8 @@ mov  #&o21*256+0,-(sp)	; GETTIM - Get Time
 mov  sp,r0
 emt  &o375
 cmp  (sp)+,(sp)+	; Drop command and address
-mov  (sp)+,r1		; Get 50Hz/60Hz tick to r1:r0
-mov  (sp)+,r0
+mov  (sp)+,r0		; Get 50Hz/60Hz tick to r1:r0
+mov  (sp)+,r1		; These have been swapped. Majenko 2026.
 mov  (sp),sp		; Restore SP
 rts  pc
 
